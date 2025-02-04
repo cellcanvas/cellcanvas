@@ -1,0 +1,362 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>atrium.cellcanvas.org - UV Script Collection</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #1d4ed8;
+            --background-color: #f8fafc;
+            --card-background: #ffffff;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --border-color: #e2e8f0;
+            --hover-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            --footer-background: var(--card-background);
+            --footer-text: var(--text-secondary);
+            --footer-link: var(--primary-color);
+        }
+
+        .footer {
+            background-color: var(--footer-background);
+            padding: 2rem 1rem;
+            margin-top: 4rem;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .footer-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            text-align: center;
+            color: var(--footer-text);
+        }
+
+        .footer-link {
+            color: var(--footer-link);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s ease;
+        }
+
+        .footer-link:hover {
+            text-decoration: underline;
+        }
+
+        .footer-text {
+            font-size: 1.1rem;
+            line-height: 1.6;
+        }
+
+        .footer-heart {
+            color: #e25555;
+            display: inline-block;
+            animation: heartbeat 1.5s ease infinite;
+        }
+
+        @keyframes heartbeat {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --primary-color: #3b82f6;
+                --secondary-color: #60a5fa;
+                --background-color: #0f172a;
+                --card-background: #1e293b;
+                --text-primary: #f1f5f9;
+                --text-secondary: #94a3b8;
+                --border-color: #334155;
+            }
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        .header {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            padding: 2.5rem 1rem;
+            text-align: center;
+            color: white;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .search-container {
+            margin: 1rem auto 2rem;
+            max-width: 600px;
+        }
+
+        .search-box {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border: 2px solid var(--border-color);
+            border-radius: 0.5rem;
+            font-size: 1rem;
+            background-color: var(--card-background);
+            color: var(--text-primary);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 2rem;
+            padding: 1rem;
+        }
+
+        .card {
+            background: var(--card-background);
+            border-radius: 1rem;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: var(--hover-shadow);
+        }
+
+        .card-image {
+            width: 100%;
+            height: 200px;
+            object-fit: cover;
+        }
+
+        .card-content {
+            padding: 1.5rem;
+        }
+
+        .card-title {
+            font-size: 1.25rem;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+            text-decoration: none;
+        }
+
+        .card-title:hover {
+            color: var(--primary-color);
+        }
+
+        .card-metadata {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+        }
+
+        .card-metadata i {
+            margin-right: 0.5rem;
+        }
+
+        .card-description {
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+            font-size: 0.95rem;
+        }
+
+        .card-source {
+            font-size: 0.85rem;
+            padding: 0.5rem;
+            background-color: var(--background-color);
+            border-radius: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .card-source a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+
+        .card-source a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .header p {
+                font-size: 1rem;
+            }
+        }
+        
+        .header-banner {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            padding: 2rem;
+            color: white;
+            position: relative;
+        }
+
+        .header-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            align-items: flex-start;
+            gap: 2rem;
+        }
+
+        .header-logo {
+            flex-shrink: 0;
+            text-decoration: none;
+        }
+
+        .logo-image {
+            height: 80px;
+            width: auto;
+        }
+
+        .header-text {
+            flex-grow: 1;
+        }
+
+        .header-title {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            font-weight: 800;
+        }
+
+        .header-subtitle {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            line-height: 1.4;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+
+        .header-logo {
+            display: block;
+            margin-bottom: 1rem;
+        }
+        
+        .logo-image {
+            height: 80px;
+            width: auto;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+    <header class="header-banner">
+        <div class="header-content">
+            <a href="index.html" class="header-logo">
+                <img src="icon_transparent.png" alt="atrium.cellcanvas.org Logo" class="logo-image">
+            </a>
+            <div class="header-text">
+                <h1 class="header-title">atrium.cellcanvas.org</h1>
+                <p class="header-subtitle">a collection of executable scripts for studying cellular architecture</p>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="search-container">
+            <input type="text" id="searchBox" class="search-box" placeholder="Search scripts..." 
+                   onkeyup="filterCards()">
+        </div>
+
+        <div class="grid" id="scriptsGrid">
+            <div class="card">
+                
+                <div class="card-content">
+                    <a href="workflows/cellcanvas-prototype/index.html" class="card-title">
+                        <h2>cellcanvas</h2>
+                    </a>
+
+                    
+                    <img class="card-image" src="https://atrium.cellcanvas.org/workflows/cellcanvas-prototype/cover.png" alt="cellcanvas">
+                    
+
+                    
+                    <div class="card-metadata">
+                        
+                        <p><i class="fas fa-user"></i> Kyle Harrington <cellcanvas@kyleharrington.com>, Kevin Yamauchi</p>
+                        
+                        
+                        <p><i class="fas fa-code-branch"></i> 0.0.2</p>
+                        
+                    </div>
+
+                    <p class="card-description">Run CellCanvas, a tool for cellular image analysis.</p>
+
+                    <div class="card-source">
+                        <a href="workflows/cellcanvas-prototype/source.html">View Source</a>
+                    </div>
+                </div>
+            </div>
+            </div>
+    </div>
+
+    <script>
+        function filterCards() {
+            const searchText = document.getElementById('searchBox').value.toLowerCase();
+            const cards = document.getElementsByClassName('card');
+            
+            Array.from(cards).forEach(card => {
+                const title = card.querySelector('.card-title').textContent.toLowerCase();
+                const description = card.querySelector('.card-description').textContent.toLowerCase();
+                const shouldShow = title.includes(searchText) || description.includes(searchText);
+                card.style.display = shouldShow ? 'block' : 'none';
+            });
+        }
+    </script>
+    <footer class="footer">
+        <div class="footer-content">
+            <p class="footer-text">
+                Built with <span class="footer-heart">♥</span> using 
+                <a href="https://github.com/kephale/atrium" class="footer-link" target="_blank">
+                    Atrium
+                </a>
+            </p>
+        </div>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,5 @@
+Group: workflows
+Name: cellcanvas
+Description: Run CellCanvas, a tool for cellular image analysis.
+URL: https://atrium.cellcanvas.org/workflows/cellcanvas-prototype
+
