@@ -1,0 +1,36 @@
+name: Build and Deploy UV Scripts
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.12
+
+      - name: Install UV
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Generate static site using UV
+        run: |
+          uv run https://atrium.kyleharrington.com/atrium/update/0.0.1.py
+          mkdir -p docs
+          cp icon_transparent.png docs/
+          cp -r .atrium/docs/* docs/
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: docs
