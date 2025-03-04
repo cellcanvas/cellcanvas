@@ -31,6 +31,7 @@ import dask.array as da
 import numpy as np
 import copick
 import zarr
+from zarr.storage import LRUStoreCache
 import napari
 import sys
 import requests
@@ -340,8 +341,8 @@ class CopickPlugin(QWidget):
             self.expand_voxel_spacing(item, voxel_spacing)
 
     def load_tomogram(self, tomogram):
-        zarr_path = tomogram.zarr()
-        zarr_group = zarr.open(zarr_path, "r")
+        zarr_store = LRUStoreCache(tomogram.zarr(), max_size = 10_000_000_000)
+        zarr_group = zarr.open(zarr_store, "r")
 
         # Determine the number of scale levels
         scale_levels = [key for key in zarr_group.keys() if key.isdigit()]
