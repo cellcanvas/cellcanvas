@@ -237,6 +237,87 @@ class CopickPlugin(QWidget):
         if config_path:
             self.load_config(config_path)
 
+        import napari.layers.labels.labels
+        from zarr.errors import ReadOnlyError
+        import numpy as np
+
+        # Track if we're already handling a read-only operation to prevent loops
+        _handling_readonly = False
+
+        # Store original data_setitem method
+        original_data_setitem = napari.layers.labels.labels.Labels.data_setitem
+
+        # Store the original paint method
+        original_paint = napari.layers.labels.labels.Labels.paint
+
+        # Create a patched version of paint that handles read-only arrays
+        def patched_paint(self, coord, new_label, refresh=False):
+            """Patched paint method that avoids modifying read-only arrays."""
+            global _handling_readonly
+            
+            # Get shape of the data
+            shape = self.data.shape
+            
+            # Convert world coordinates to data coordinates
+            # Labels class uses world_to_data and not _transform_coordinates
+            position = self.world_to_data(coord)
+            position = np.round(position).astype(int)
+            
+            # Make sure coordinates are within data bounds
+            for i, pos in enumerate(position):
+                if pos < 0:
+                    position[i] = 0
+                elif pos >= shape[i]:
+                    position[i] = shape[i] - 1
+                    
+            # Create an event with coordinates for the server to process
+            event_coords = np.array([position[0], position[1], position[2]])
+            
+            # Trigger the custom event with position info
+            if hasattr(self.events, 'paint'):
+                self.events.paint(coordinates=[event_coords], value=new_label)
+            
+            # Skip the actual painting operation if the array is read-only
+            try:
+                # Check if we can write to this location without actually writing
+                test_value = self.data[tuple(pos for pos in position)]
+                # If we can read it, try the original paint method
+                _handling_readonly = True
+                try:
+                    original_paint(self, coord, new_label, refresh)
+                finally:
+                    _handling_readonly = False
+            except ReadOnlyError:
+                # Just log and return without modifying data
+                print(f"Read-only array detected, sending paint event for position {position} with label {new_label}")
+                # Force a refresh to give visual feedback
+                if not refresh:
+                    self.refresh()
+
+        # Create a patched version of data_setitem that handles read-only zarr arrays
+        def patched_data_setitem(self, indices, value, refresh=False):
+            """Patched data_setitem method that silently handles read-only errors."""
+            global _handling_readonly
+            
+            # Prevent infinite loop
+            if _handling_readonly:
+                return
+                
+            # Try to modify the data, but catch ReadOnlyError
+            try:
+                original_data_setitem(self, indices, value, refresh)
+            except ReadOnlyError:
+                # Just log the attempted update but don't fail
+                print(f"Skipping write to read-only array at {indices[0].shape[0] if hasattr(indices[0], 'shape') else 'unknown'} points with value {value}")
+                
+                # Don't trigger additional events - this prevents the infinite loop
+                if not refresh:
+                    self.refresh()
+
+        # Apply the monkey patches
+        napari.layers.labels.labels.Labels.data_setitem = patched_data_setitem
+        napari.layers.labels.labels.Labels.paint = patched_paint
+
     def setup_ui(self):
         layout = QVBoxLayout()
 
@@ -450,8 +531,16 @@ class CopickPlugin(QWidget):
         return layer
 
     def ensure_and_load_segmentations(self, run_name, voxel_size, tomogram_type):
-        """Ensure painting and prediction segmentations exist and load them into napari."""
+        """Ensure painting and prediction segmentations exist and load them from the server via HTTP zarr."""
         print(f"Ensuring and loading segmentations for {run_name}, voxel size {voxel_size}, tomogram {tomogram_type}")
+        
+        # First, check if the server is connected
+        if not self.cellcanvas_client.test_connection():
+            print("Warning: Server not connected. Attempting to reconnect...")
+            # Try to reconnect
+            if not self.cellcanvas_client.test_connection():
+                print("Error: Cannot connect to CellCanvas server. Segmentations will not be synchronized.")
+                return False
         
         # Prepare the request data
         request_data = {
@@ -472,99 +561,271 @@ class CopickPlugin(QWidget):
         )
         
         if response and response.get('status') == 'success':
-            print("Successfully ensured segmentations exist")
+            print("Successfully ensured segmentations exist on server")
             
-            # Get the segmentations from the local copick instance
-            run = self.root.get_run(run_name)
-            if run:
-                # Store the current run and voxel size for later use
-                self.current_run_name = run_name
-                self.current_voxel_size = voxel_size
-                
-                # Get the painting segmentation
-                painting_segs = run.get_segmentations(
-                    voxel_size=voxel_size,
-                    name='painting',
-                    user_id='napariUser',
-                    session_id=self.session_id
-                )
-                
-                # Get the prediction segmentation
-                prediction_segs = run.get_segmentations(
-                    voxel_size=voxel_size,
-                    name='prediction',
-                    user_id='napariUser',
-                    session_id=self.session_id
-                )
-                
-                # Load the segmentations in the viewer
-                if painting_segs:
-                    self.painting_layer = self.load_segmentation(painting_segs[0])
-                    if self.painting_layer:
-                        # Store a reference to the painting layer for later use
-                        self.active_painting_layer = self.painting_layer
-                        # Set up event listener for painting updates
-                        self.setup_painting_listener(self.painting_layer)
-                
-                if prediction_segs:
-                    self.prediction_layer = self.load_segmentation(prediction_segs[0])
-                    if self.prediction_layer:
-                        # Store a reference to the prediction layer for later use
-                        self.active_prediction_layer = self.prediction_layer
+            # Store the current run and voxel size for later use
+            self.current_run_name = run_name
+            self.current_voxel_size = voxel_size
+            
+            # Load the segmentations via HTTP zarr
+            server_url = self.cellcanvas_client.server_url
+            base_url = server_url.rstrip("/")
+            
+            # Construct URLs for painting and prediction segmentations
+            painting_url = f"{base_url}/{run_name}/Segmentations/{voxel_size}_napariUser_{self.session_id}_painting-multilabel.zarr"
+            prediction_url = f"{base_url}/{run_name}/Segmentations/{voxel_size}_napariUser_{self.session_id}_prediction-multilabel.zarr"
+            
+            print(f"Loading painting segmentation from: {painting_url}")
+            self.painting_layer = self._load_segmentation_from_url(painting_url, "Painting", voxel_size)
+            
+            print(f"Loading prediction segmentation from: {prediction_url}")
+            self.prediction_layer = self._load_segmentation_from_url(prediction_url, "Prediction", voxel_size)
+            
+            # Set up event listener for painting updates if the layer was loaded
+            if self.painting_layer:
+                self.active_painting_layer = self.painting_layer
+                self.setup_painting_listener(self.painting_layer)
+                print(f"Successfully set up painting layer with event listener")
+            
+            # Store a reference to the prediction layer if it was loaded
+            if self.prediction_layer:
+                self.active_prediction_layer = self.prediction_layer
+            
+            return True
         else:
-            print("Failed to ensure segmentations exist")
-            if response:
-                print(f"Error: {response.get('error', 'Unknown error')}")
+            print("Failed to ensure segmentations exist on server")
+            if response and 'error' in response:
+                print(f"Error: {response['error']}")
+            
+        return False
+
+    def _load_segmentation_from_url(self, url, name_prefix, voxel_size):
+        """Load a segmentation from a zarr URL into napari."""
+        try:
+            import zarr
+            from fsspec import get_mapper
+            
+            print(f"Loading {name_prefix} segmentation from URL: {url}")
+            
+            # Open the zarr store using fsspec
+            store = get_mapper(url)
+            zarr_root = zarr.open(store, mode='r')
+            
+            # Find the data array - either "data" or "0" are common dataset names
+            data_arr = None
+            if "data" in zarr_root:
+                data_arr = zarr_root["data"]
+                print(f"Found 'data' dataset in zarr store")
+            elif "0" in zarr_root:
+                data_arr = zarr_root["0"]
+                print(f"Found '0' dataset in zarr store")
+            else:
+                # Try to find any array in the store
+                for key in zarr_root.keys():
+                    if isinstance(zarr_root[key], zarr.core.Array):
+                        data_arr = zarr_root[key]
+                        print(f"Found '{key}' dataset in zarr store")
+                        break
+            
+            if data_arr is None:
+                print(f"Error: No data array found in {url}")
+                return None
+            
+            print(f"Loading array with shape {data_arr.shape} and dtype {data_arr.dtype}")
+            
+            # Create scale array based on voxel size
+            scale = [float(voxel_size)] * 3
+            
+            # Add the segmentation to napari
+            layer = self.viewer.add_labels(
+                data_arr,
+                name=f"{name_prefix} Segmentation",
+                scale=scale,
+                opacity=0.5
+            )
+            
+            # For painting layer, set up the colormap and painting labels
+            if name_prefix.lower() == "painting" and hasattr(self.root, 'config') and hasattr(self.root.config, 'pickable_objects'):
+                # Create a color map based on copick colors
+                colormap = self.get_copick_colormap()
+                
+                # Apply the colormap
+                from napari.utils import DirectLabelColormap
+                layer.colormap = DirectLabelColormap(color_dict=colormap)
+                
+                # Set up the painting labels
+                layer.painting_labels = [
+                    obj.label for obj in self.root.config.pickable_objects
+                ]
+                
+                # Store the class labels mapping
+                self.class_labels_mapping = {
+                    obj.label: obj.name for obj in self.root.config.pickable_objects
+                }
+            
+            print(f"Successfully loaded {name_prefix} segmentation")
+            return layer
+            
+        except Exception as e:
+            print(f"Error loading {name_prefix} segmentation from {url}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def setup_painting_listener(self, layer):
-        """Set up event listener for painting layer to send updates to the server."""
-        # Define the callback function for label changes
+        """Set up event listener for painting layer to send updates to the server with enhanced debugging."""
+        
+        # Remove any existing callback before adding a new one
+        if hasattr(self, 'painting_callback') and self.painting_callback is not None:
+            # Try to disconnect previous callback if it exists
+            try:
+                # Attempt to disconnect from various event types
+                for event_type in ['data', 'set_data', 'paint']:
+                    if hasattr(layer.events, event_type):
+                        try:
+                            event = getattr(layer.events, event_type)
+                            event.disconnect(self.painting_callback)
+                            print(f"Disconnected callback from {event_type} event")
+                        except Exception as e:
+                            print(f"Could not disconnect from {event_type}: {str(e)}")
+            except Exception as e:
+                print(f"Error disconnecting callbacks: {str(e)}")
+        
+        # Add verbose debug output at start of painting listener setup
+        print(f"\nSetting up painting listener for layer: {layer.name}")
+        print(f"Available events on layer: {[attr for attr in dir(layer.events) if not attr.startswith('_')]}")
+        print(f"Layer class: {layer.__class__.__name__}")
+        print(f"Layer data shape: {layer.data.shape}")
+        print(f"Layer selected label: {layer.selected_label}")
+        
+        # Define the callback function for label changes with enhanced debugging
         def on_data_changed(event):
+            # Extensive debug printing
+            print(f"\n---- PAINT EVENT DETECTED ----")
+            print(f"Event type: {type(event).__name__}")
+            print(f"Event source: {event.source}")
+            print(f"Event attributes: {[attr for attr in dir(event) if not attr.startswith('_')]}")
+            
             # Only handle data change events from this specific layer
             if event.source != layer:
+                print(f"Ignoring event from different source: {event.source}")
+                return
+            
+            # Try different approaches to get coordinates
+            coordinates = None
+            
+            # Approach 1: Direct coordinates from event
+            if hasattr(event, 'coordinates') and event.coordinates is not None:
+                print(f"Found coordinates directly in event: {len(event.coordinates)} points")
+                coordinates = event.coordinates
+            
+            # Approach 2: Coordinates in event.data
+            elif hasattr(event, 'data') and hasattr(event.data, 'coordinates') and event.data.coordinates is not None:
+                print(f"Found coordinates in event.data: {len(event.data.coordinates)} points")
+                coordinates = event.data.coordinates
+            
+            # Approach 3: Try to get from indices
+            elif hasattr(event, 'indices') and event.indices is not None:
+                print(f"Using indices from event: {len(event.indices)} points")
+                coordinates = event.indices
+                
+            # Approach 4: For paint events
+            elif hasattr(event, 'pos') and event.pos is not None:
+                print(f"Using position from paint event")
+                coordinates = [event.pos]
+                
+            if coordinates is None or len(coordinates) == 0:
+                print("No coordinates found in event. Attempting to extract from layer data changes...")
+                # We might need a more sophisticated approach to detect which voxels changed
+                print("Cannot determine coordinates from this event type. Skipping.")
                 return
                 
-            # Access updated coordinates from the event
-            if hasattr(event, 'coordinates') and event.coordinates is not None:
-                print(f"Painting update: {len(event.coordinates)} points with label {event.value}")
-                
-                # Convert coordinates to a list of [z, y, x] format
-                coords = []
-                for coord in event.coordinates:
-                    # Ensure we have 3D coordinates and convert to integers
-                    if len(coord) == 3:
-                        coords.append([int(coord[0]), int(coord[1]), int(coord[2])])
-                
-                if coords:
-                    # Prepare the request data
-                    request_data = {
-                        'run_name': self.current_run_name,
-                        'voxel_size': self.current_voxel_size,
-                        'user_id': 'napariUser',
-                        'session_id': self.session_id,
-                        'segmentation_name': 'painting',
-                        'coordinates': coords,
-                        'label': int(event.value)
-                    }
+            print(f"Found {len(coordinates)} coordinates with label {layer.selected_label}")
+            
+            # Convert coordinates to a list of [z, y, x] format
+            coords = []
+            for coord in coordinates:
+                # Ensure we have 3D coordinates and convert to integers
+                if len(coord) == 3:
+                    coords.append([int(coord[0]), int(coord[1]), int(coord[2])])
                     
-                    # Send the update to the server
-                    self.cellcanvas_client.send_request(
-                        'api/painting/update',
-                        params=request_data,
-                        method='POST'
-                    )
+            if len(coords) == 0:
+                print("No valid 3D coordinates found. Skipping.")
+                return
+                
+            print(f"Processed {len(coords)} valid coordinates")
+            
+            # Get current label - this is important!
+            current_label = layer.selected_label
+            print(f"Current selected label: {current_label}")
+            
+            # Prepare the request data
+            request_data = {
+                'run_name': self.current_run_name,
+                'voxel_size': self.current_voxel_size,
+                'user_id': 'napariUser',
+                'session_id': self.session_id,
+                'segmentation_name': 'painting',
+                'coordinates': coords,
+                'label': int(current_label)
+            }
+            
+            # Print request data for debugging (excluding coordinates for brevity)
+            debug_data = request_data.copy()
+            debug_data['coordinates'] = f"[{len(coords)} coordinates]"
+            print(f"Sending request data: {debug_data}")
+            
+            # Send the update to the server
+            print(f"Sending painting update to server...")
+            response = self.cellcanvas_client.send_request(
+                'api/painting/update',
+                params=request_data,
+                method='POST'
+            )
+            
+            if response and response.get('status') == 'success':
+                print(f"Successfully sent painting update to server")
+                print(f"Server response: {response}")
+            else:
+                print(f"Failed to send painting update to server")
+                if response:
+                    print(f"Server response: {response}")
         
-        # Connect the data changed event to our callback
+        # Connect to all relevant event types to ensure we catch painting operations
+        print("Connecting event handlers...")
+        
+        # Main data change event
         layer.events.data.connect(on_data_changed)
+        print("Connected to layer.events.data")
         
-        # Also connect to the set_data event to catch brush strokes
+        # Connect to paint event if available
+        if hasattr(layer.events, 'paint'):
+            layer.events.paint.connect(on_data_changed)
+            print("Connected to layer.events.paint")
+        
+        # Connect to set_data event if available
         if hasattr(layer.events, 'set_data'):
             layer.events.set_data.connect(on_data_changed)
-        
+            print("Connected to layer.events.set_data")
+            
         # Save a reference to the current painting layer callback
         self.painting_callback = on_data_changed
         
-        print("Painting layer event listener set up")
+        print("Painting layer event listener setup completed with enhanced debugging")
+        
+        # Optional - add a test event to verify the callback works
+        print("\nTesting event callback with mock event...")
+        from types import SimpleNamespace
+        mock_event = SimpleNamespace(
+            source=layer,
+            coordinates=[[0, 0, 0]],
+            value=layer.selected_label
+        )
+        try:
+            on_data_changed(mock_event)
+            print("Test event processed successfully")
+        except Exception as e:
+            print(f"Error processing test event: {str(e)}")
 
     def load_segmentation(self, segmentation):
         zarr_data = zarr.open(segmentation.zarr(), "r+")
@@ -819,7 +1080,7 @@ class CopickPlugin(QWidget):
         widget.close()
 
     # ------- CellCanvas Integration Methods -------
-    
+
     def configure_cellcanvas(self):
         """Open a dialog to configure CellCanvas settings."""
         dialog = CellCanvasServerDialog(
