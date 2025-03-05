@@ -128,6 +128,8 @@ class CellCanvasClient:
     
     def __init__(self, server_url="http://localhost:8000"):
         self.server_url = server_url
+        self.connected = False
+        self.last_error = None
     
     def send_request(self, endpoint, params=None, method="GET"):
         """Send a request to the server."""
@@ -136,21 +138,69 @@ class CellCanvasClient:
         
         try:
             if method.upper() == "GET":
-                response = requests.get(url, params=params)
+                response = requests.get(url, params=params, timeout=10)
             elif method.upper() == "POST":
-                response = requests.post(url, json=params)
+                response = requests.post(url, json=params, timeout=10)
             else:
-                print(f"Unsupported method: {method}")
+                error_msg = f"Unsupported method: {method}"
+                print(error_msg)
+                self.last_error = error_msg
+                self.connected = False
                 return None
                 
             if response.status_code != 200:
-                print(f"Error {response.status_code}: {response.text}")
+                error_msg = f"Error {response.status_code}: {response.text}"
+                print(error_msg)
+                self.last_error = error_msg
+                self.connected = False
                 return None
                 
+            # Request succeeded, mark as connected
+            self.connected = True
+            self.last_error = None
             return response.json()
-        except Exception as e:
-            print(f"Request error: {str(e)}")
+        except requests.exceptions.ConnectionError:
+            error_msg = f"Connection error: Could not connect to {url}"
+            print(error_msg)
+            self.last_error = error_msg
+            self.connected = False
             return None
+        except requests.exceptions.Timeout:
+            error_msg = f"Timeout error: Request to {url} timed out"
+            print(error_msg)
+            self.last_error = error_msg
+            self.connected = False
+            return None
+        except Exception as e:
+            error_msg = f"Request error: {str(e)}"
+            print(error_msg)
+            self.last_error = error_msg
+            self.connected = False
+            return None
+    
+    def test_connection(self):
+        """Test the connection to the server."""
+        try:
+            response = self.send_request("ping")
+            if response and response.get("status") == "ok":
+                self.connected = True
+                return True
+            else:
+                self.connected = False
+                return False
+        except Exception as e:
+            print(f"Connection test failed: {str(e)}")
+            self.connected = False
+            self.last_error = str(e)
+            return False
+    
+    def get_status_text(self):
+        """Get a status text for display."""
+        if self.connected:
+            return f"CellCanvas: Connected to {self.server_url} (✓)"
+        else:
+            error_text = f" - {self.last_error}" if self.last_error else ""
+            return f"CellCanvas: Not connected{error_text}"
 
 
 class CopickPlugin(QWidget):
@@ -172,9 +222,16 @@ class CopickPlugin(QWidget):
             'voxel_spacing': 10.0
         }
         
-        # For tracking active tomogram
+        # For tracking active tomogram and segmentations
         self.active_tomogram = None
         self.active_tomogram_scale = None
+        self.active_painting_layer = None
+        self.active_prediction_layer = None
+        self.current_run_name = None
+        self.current_voxel_size = None
+        self.painting_callback = None
+        self.painting_layer = None
+        self.prediction_layer = None
         
         self.setup_ui()
         if config_path:
@@ -341,6 +398,10 @@ class CopickPlugin(QWidget):
             self.expand_voxel_spacing(item, voxel_spacing)
 
     def load_tomogram(self, tomogram):
+        # TODO update cell canvas settings when tomogram is loaded
+        # self.cellcanvas_settings['run_name'] = data.meta.name
+        # self.cellcanvas_settings['voxel_spacing'] = data.meta.voxel_size
+
         zarr_store = LRUStoreCache(tomogram.zarr(), max_size = 10_000_000_000)
         zarr_group = zarr.open(zarr_store, "r")
 
@@ -354,10 +415,12 @@ class CopickPlugin(QWidget):
         # Get the voxel size from the parent voxel spacing object
         # We need to find the parent voxel spacing that this tomogram belongs to
         voxel_size = None
+        run_name = None
         for run in self.root.runs:
             for voxel_spacing in run.voxel_spacings:
                 if tomogram in voxel_spacing.tomograms:
                     voxel_size = voxel_spacing.meta.voxel_size
+                    run_name = run.meta.name
                     break
             if voxel_size is not None:
                 break
@@ -371,12 +434,137 @@ class CopickPlugin(QWidget):
             print("Warning: Could not find voxel size for tomogram, using default scale of 1.0")
 
         layer.scale = self.active_tomogram_scale
+        
+        # Update active tomogram properties
+        self.active_tomogram = tomogram
+        
+        # Automatically load or create segmentations from the CellCanvas server
+        if run_name and voxel_size:
+            # Ensure segmentations exist on the server
+            self.ensure_and_load_segmentations(run_name, voxel_size, tomogram.meta.tomo_type)
 
         self.info_label.setText(
             f"Loaded Tomogram: {tomogram.meta.tomo_type} with num scales = {len(scale_levels)}"
         )
 
         return layer
+
+    def ensure_and_load_segmentations(self, run_name, voxel_size, tomogram_type):
+        """Ensure painting and prediction segmentations exist and load them into napari."""
+        print(f"Ensuring and loading segmentations for {run_name}, voxel size {voxel_size}, tomogram {tomogram_type}")
+        
+        # Prepare the request data
+        request_data = {
+            'run_name': run_name,
+            'voxel_size': voxel_size,
+            'tomogram_type': tomogram_type,
+            'user_id': 'napariUser',  # Default user ID
+            'session_id': self.session_id,
+            'painting_name': 'painting',
+            'prediction_name': 'prediction'
+        }
+        
+        # Send the request to ensure segmentations exist
+        response = self.cellcanvas_client.send_request(
+            'api/segmentation/ensure',
+            params=request_data,
+            method='POST'
+        )
+        
+        if response and response.get('status') == 'success':
+            print("Successfully ensured segmentations exist")
+            
+            # Get the segmentations from the local copick instance
+            run = self.root.get_run(run_name)
+            if run:
+                # Store the current run and voxel size for later use
+                self.current_run_name = run_name
+                self.current_voxel_size = voxel_size
+                
+                # Get the painting segmentation
+                painting_segs = run.get_segmentations(
+                    voxel_size=voxel_size,
+                    name='painting',
+                    user_id='napariUser',
+                    session_id=self.session_id
+                )
+                
+                # Get the prediction segmentation
+                prediction_segs = run.get_segmentations(
+                    voxel_size=voxel_size,
+                    name='prediction',
+                    user_id='napariUser',
+                    session_id=self.session_id
+                )
+                
+                # Load the segmentations in the viewer
+                if painting_segs:
+                    self.painting_layer = self.load_segmentation(painting_segs[0])
+                    if self.painting_layer:
+                        # Store a reference to the painting layer for later use
+                        self.active_painting_layer = self.painting_layer
+                        # Set up event listener for painting updates
+                        self.setup_painting_listener(self.painting_layer)
+                
+                if prediction_segs:
+                    self.prediction_layer = self.load_segmentation(prediction_segs[0])
+                    if self.prediction_layer:
+                        # Store a reference to the prediction layer for later use
+                        self.active_prediction_layer = self.prediction_layer
+        else:
+            print("Failed to ensure segmentations exist")
+            if response:
+                print(f"Error: {response.get('error', 'Unknown error')}")
+
+    def setup_painting_listener(self, layer):
+        """Set up event listener for painting layer to send updates to the server."""
+        # Define the callback function for label changes
+        def on_data_changed(event):
+            # Only handle data change events from this specific layer
+            if event.source != layer:
+                return
+                
+            # Access updated coordinates from the event
+            if hasattr(event, 'coordinates') and event.coordinates is not None:
+                print(f"Painting update: {len(event.coordinates)} points with label {event.value}")
+                
+                # Convert coordinates to a list of [z, y, x] format
+                coords = []
+                for coord in event.coordinates:
+                    # Ensure we have 3D coordinates and convert to integers
+                    if len(coord) == 3:
+                        coords.append([int(coord[0]), int(coord[1]), int(coord[2])])
+                
+                if coords:
+                    # Prepare the request data
+                    request_data = {
+                        'run_name': self.current_run_name,
+                        'voxel_size': self.current_voxel_size,
+                        'user_id': 'napariUser',
+                        'session_id': self.session_id,
+                        'segmentation_name': 'painting',
+                        'coordinates': coords,
+                        'label': int(event.value)
+                    }
+                    
+                    # Send the update to the server
+                    self.cellcanvas_client.send_request(
+                        'api/painting/update',
+                        params=request_data,
+                        method='POST'
+                    )
+        
+        # Connect the data changed event to our callback
+        layer.events.data.connect(on_data_changed)
+        
+        # Also connect to the set_data event to catch brush strokes
+        if hasattr(layer.events, 'set_data'):
+            layer.events.set_data.connect(on_data_changed)
+        
+        # Save a reference to the current painting layer callback
+        self.painting_callback = on_data_changed
+        
+        print("Painting layer event listener set up")
 
     def load_segmentation(self, segmentation):
         zarr_data = zarr.open(segmentation.zarr(), "r+")
@@ -391,7 +579,7 @@ class CopickPlugin(QWidget):
         colormap = self.get_copick_colormap()
         
         # Create the labels layer with the correct colormap
-        painting_layer = self.viewer.add_labels(
+        labels_layer = self.viewer.add_labels(
             data,
             name=f"Segmentation: {segmentation.meta.name}",
             scale=scale,
@@ -399,10 +587,10 @@ class CopickPlugin(QWidget):
         )
         
         # Apply the colormap
-        painting_layer.colormap = DirectLabelColormap(color_dict=colormap)
+        labels_layer.colormap = DirectLabelColormap(color_dict=colormap)
         
         # Set up the painting labels
-        painting_layer.painting_labels = [
+        labels_layer.painting_labels = [
             obj.label for obj in self.root.config.pickable_objects
         ]
         
@@ -412,6 +600,9 @@ class CopickPlugin(QWidget):
         }
 
         self.info_label.setText(f"Loaded Segmentation: {segmentation.meta.name}")
+        
+        # Return the layer so we can keep track of it
+        return labels_layer
 
     def get_copick_colormap(self, pickable_objects=None):
         if not pickable_objects:
@@ -628,7 +819,7 @@ class CopickPlugin(QWidget):
         widget.close()
 
     # ------- CellCanvas Integration Methods -------
-
+    
     def configure_cellcanvas(self):
         """Open a dialog to configure CellCanvas settings."""
         dialog = CellCanvasServerDialog(
@@ -641,46 +832,50 @@ class CopickPlugin(QWidget):
             # Update settings
             self.cellcanvas_settings = dialog.get_settings()
             self.cellcanvas_client = CellCanvasClient(self.cellcanvas_settings['server_url'])
-            self.cellcanvas_status_label.setText(f"CellCanvas: Connected to {self.cellcanvas_settings['server_url']}")
-            self.info_label.setText(f"CellCanvas configured for run: {self.cellcanvas_settings['run_name']}")
             
             # Test connection to server
-            self.test_server_connection()
-    
+            if self.cellcanvas_client.test_connection():
+                self.cellcanvas_status_label.setText(f"CellCanvas: Connected to {self.cellcanvas_settings['server_url']} (✓)")
+                self.info_label.setText(f"CellCanvas configured for run: {self.cellcanvas_settings['run_name']}")
+            else:
+                self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
+                self.info_label.setText("Warning: Could not connect to CellCanvas server. Check settings.")
+
     def test_server_connection(self):
         """Test the connection to the CellCanvas server."""
-        # This is a placeholder for future implementation
-        # In the future, you can add actual API endpoint tests here
-        try:
-            # Example: ping the server or get a simple response
-            response = requests.get(f"{self.cellcanvas_settings['server_url']}/ping", timeout=5)
-            if response.status_code == 200:
-                self.cellcanvas_status_label.setText(f"CellCanvas: Connected (✓)")
-                return True
-            else:
-                self.cellcanvas_status_label.setText(f"CellCanvas: Connection error ({response.status_code})")
-                return False
-        except Exception as e:
-            self.cellcanvas_status_label.setText(f"CellCanvas: Connection failed")
-            print(f"Server connection failed: {str(e)}")
+        if self.cellcanvas_client.test_connection():
+            self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
+            return True
+        else:
+            self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
             return False
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Copick Plugin")
+    parser = argparse.ArgumentParser(description="CellCanvas Napari-Copick Client")
     parser.add_argument(
         "--config_path",
         type=str,
         required=True,
-        help="Path to the copick config file",
+        help="Path to the copick config file"
+    )
+    parser.add_argument(
+        "--server_url",
+        type=str,
+        default="http://localhost:8000",
+        help="URL of the CellCanvas server"
     )
     args = parser.parse_args()
 
-    config_path = None
-
     viewer = napari.Viewer()
-    copick_plugin = CopickPlugin(viewer, config_path=(args.config_path if config_path is None else config_path))
+    copick_plugin = CopickPlugin(viewer, config_path=args.config_path)
+    
+    # Set the server URL from command line
+    copick_plugin.cellcanvas_settings['server_url'] = args.server_url
+    copick_plugin.cellcanvas_client = CellCanvasClient(args.server_url)
+    copick_plugin.cellcanvas_status_label.setText(f"CellCanvas: Connected to {args.server_url}")
+    
     viewer.window.add_dock_widget(copick_plugin, area="right")
     napari.run()
