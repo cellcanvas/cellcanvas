@@ -237,87 +237,6 @@ class CopickPlugin(QWidget):
         if config_path:
             self.load_config(config_path)
 
-        import napari.layers.labels.labels
-        from zarr.errors import ReadOnlyError
-        import numpy as np
-
-        # Track if we're already handling a read-only operation to prevent loops
-        _handling_readonly = False
-
-        # Store original data_setitem method
-        original_data_setitem = napari.layers.labels.labels.Labels.data_setitem
-
-        # Store the original paint method
-        original_paint = napari.layers.labels.labels.Labels.paint
-
-        # Create a patched version of paint that handles read-only arrays
-        def patched_paint(self, coord, new_label, refresh=False):
-            """Patched paint method that avoids modifying read-only arrays."""
-            global _handling_readonly
-            
-            # Get shape of the data
-            shape = self.data.shape
-            
-            # Convert world coordinates to data coordinates
-            # Labels class uses world_to_data and not _transform_coordinates
-            position = self.world_to_data(coord)
-            position = np.round(position).astype(int)
-            
-            # Make sure coordinates are within data bounds
-            for i, pos in enumerate(position):
-                if pos < 0:
-                    position[i] = 0
-                elif pos >= shape[i]:
-                    position[i] = shape[i] - 1
-                    
-            # Create an event with coordinates for the server to process
-            event_coords = np.array([position[0], position[1], position[2]])
-            
-            # Trigger the custom event with position info
-            if hasattr(self.events, 'paint'):
-                self.events.paint(coordinates=[event_coords], value=new_label)
-            
-            # Skip the actual painting operation if the array is read-only
-            try:
-                # Check if we can write to this location without actually writing
-                test_value = self.data[tuple(pos for pos in position)]
-                # If we can read it, try the original paint method
-                _handling_readonly = True
-                try:
-                    original_paint(self, coord, new_label, refresh)
-                finally:
-                    _handling_readonly = False
-            except ReadOnlyError:
-                # Just log and return without modifying data
-                print(f"Read-only array detected, sending paint event for position {position} with label {new_label}")
-                # Force a refresh to give visual feedback
-                if not refresh:
-                    self.refresh()
-
-        # Create a patched version of data_setitem that handles read-only zarr arrays
-        def patched_data_setitem(self, indices, value, refresh=False):
-            """Patched data_setitem method that silently handles read-only errors."""
-            global _handling_readonly
-            
-            # Prevent infinite loop
-            if _handling_readonly:
-                return
-                
-            # Try to modify the data, but catch ReadOnlyError
-            try:
-                original_data_setitem(self, indices, value, refresh)
-            except ReadOnlyError:
-                # Just log the attempted update but don't fail
-                print(f"Skipping write to read-only array at {indices[0].shape[0] if hasattr(indices[0], 'shape') else 'unknown'} points with value {value}")
-                
-                # Don't trigger additional events - this prevents the infinite loop
-                if not refresh:
-                    self.refresh()
-
-        # Apply the monkey patches
-        napari.layers.labels.labels.Labels.data_setitem = patched_data_setitem
-        napari.layers.labels.labels.Labels.paint = patched_paint
-
     def setup_ui(self):
         layout = QVBoxLayout()
 
@@ -609,7 +528,7 @@ class CopickPlugin(QWidget):
             
             # Open the zarr store using fsspec
             store = get_mapper(url)
-            zarr_root = zarr.open(store, mode='r')
+            zarr_root = zarr.open(store, mode='r+')
             
             # Find the data array - either "data" or "0" are common dataset names
             data_arr = None

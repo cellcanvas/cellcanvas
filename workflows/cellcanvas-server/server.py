@@ -20,13 +20,16 @@
 #     "numpy",
 #     "torch",
 #     "copick",
-#     "copick-server @ git+https://github.com/kephale/copick-server",
+#     "copick-server @ file:///Users/kharrington/git/copick/copick-server",
+#     "copick-utils @ git+https://github.com/copick/copick-utils",
 #     "click",
 #     "uvicorn",
 #     "starlette",
 #     "zarr<3",
 # ]
 # ///
+
+#     "copick-server @ git+https://github.com/kephale/copick-server",
 
 import os
 import json
