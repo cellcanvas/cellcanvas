@@ -36,6 +36,8 @@ from zarr.storage import LRUStoreCache
 import napari
 import sys
 import requests
+import queue
+import threading
 import json
 from pathlib import Path
 from qtpy.QtWidgets import (
@@ -114,7 +116,7 @@ class CellCanvasServerDialog(QDialog):
         layout.addLayout(button_layout)
         
         self.setLayout(layout)
-    
+
     def get_settings(self):
         """Return the current settings from the dialog."""
         return {
@@ -203,6 +205,15 @@ class CellCanvasClient:
             error_text = f" - {self.last_error}" if self.last_error else ""
             return f"CellCanvas: Not connected{error_text}"
 
+from qtpy.QtCore import QObject, Signal
+
+# should use psygnal
+class TreeUpdateSignaler(QObject):
+    """Simple signaler for updating tree items from background threads."""
+    update_tree = Signal(object, object)  # parent_item, data_callback
+
+# Add this global signaler
+_tree_signaler = TreeUpdateSignaler()
 
 class CopickPlugin(QWidget):
     def __init__(self, viewer=None, config_path=None):
@@ -278,6 +289,36 @@ class CopickPlugin(QWidget):
 
         self.setLayout(layout)
 
+    def process_update_queue(self):
+        """Background thread to process painting updates."""
+        import time
+        while True:
+            try:
+                # Get an item from the queue with a timeout to allow checking for exit
+                try:
+                    item = self.update_queue.get(timeout=0.5)
+                except queue.Empty:
+                    time.sleep(0.1)
+                    continue
+                
+                if item is None:  # Sentinel value to stop the thread
+                    break
+                
+                # Process the update
+                endpoint, params, method = item
+                
+                try:
+                    # Send the update to the server
+                    self.cellcanvas_client.send_request(endpoint, params, method)
+                except Exception as e:
+                    print(f"Error processing update: {str(e)}")
+                
+                # Mark this task as done
+                self.update_queue.task_done()
+            except Exception as e:
+                print(f"Error in update queue processing: {str(e)}")  
+    
+
     def open_file_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Config", "", "JSON Files (*.json)"
@@ -304,9 +345,36 @@ class CopickPlugin(QWidget):
     def handle_item_expand(self, item):
         data = item.data(0, Qt.UserRole)
         if isinstance(data, copick.models.CopickRun):
-            self.expand_run(item, data)
+            # Just load the main categories, not the actual data
+            self.create_run_structure(item, data)
         elif isinstance(data, copick.models.CopickVoxelSpacing):
-            self.expand_voxel_spacing(item, data)
+            self.create_voxel_spacing_structure(item, data)
+        elif item.text(0) == "Picks":
+            # Lazy load picks when the Picks item is expanded
+            self.expand_picks(item, item.parent().data(0, Qt.UserRole))
+        elif item.text(0) == "Tomograms":
+            # Lazy load tomograms
+            self.expand_tomograms(item, item.parent().data(0, Qt.UserRole))
+        elif item.text(0) == "Segmentations":
+            # Lazy load segmentations
+            self.expand_segmentations(item, item.parent().data(0, Qt.UserRole))
+
+    def create_run_structure(self, item, run):
+        """Create just the structure without loading all data."""
+        if not item.childCount():
+            # Add voxel spacing items
+            for voxel_spacing in run.voxel_spacings:
+                spacing_item = QTreeWidgetItem(
+                    item, [f"Voxel Spacing: {voxel_spacing.meta.voxel_size}"]
+                )
+                spacing_item.setData(0, Qt.UserRole, voxel_spacing)
+                spacing_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            
+            # Just add the Picks category, not the actual data
+            picks_item = QTreeWidgetItem(item, ["Picks"])
+            picks_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            
+            item.addChild(picks_item)
 
     def expand_run(self, item, run):
         if not item.childCount():
@@ -363,6 +431,70 @@ class CopickPlugin(QWidget):
                 )
                 seg_child.setData(0, Qt.UserRole, segmentation)
             item.addChild(segmentation_item)
+
+    def expand_picks(self, item, run):
+        """Lazily load picks."""
+        if not item.childCount():
+            # Load picks directly (no threading)
+            user_dict = {}
+            for pick in run.picks:
+                if pick.meta.user_id not in user_dict:
+                    user_dict[pick.meta.user_id] = {}
+                if pick.meta.session_id not in user_dict[pick.meta.user_id]:
+                    user_dict[pick.meta.user_id][pick.meta.session_id] = []
+                user_dict[pick.meta.user_id][pick.meta.session_id].append(pick)
+            
+            for user_id, sessions in user_dict.items():
+                user_item = QTreeWidgetItem(item, [f"User: {user_id}"])
+                for session_id, picks in sessions.items():
+                    session_item = QTreeWidgetItem(user_item, [f"Session: {session_id}"])
+                    for pick in picks:
+                        pick_child = QTreeWidgetItem(session_item, [pick.meta.pickable_object_name])
+                        pick_child.setData(0, Qt.UserRole, pick)
+
+    # Helper method to safely update UI from background thread
+    def update_ui_picks(self, callback):
+        callback()
+
+    def create_voxel_spacing_structure(self, item, voxel_spacing):
+        """Create just the structure of voxel spacing items."""
+        if not item.childCount():
+            # Just add category items, not the actual data
+            tomogram_item = QTreeWidgetItem(item, ["Tomograms"])
+            tomogram_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            item.addChild(tomogram_item)
+            
+            segmentation_item = QTreeWidgetItem(item, ["Segmentations"])
+            segmentation_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            item.addChild(segmentation_item)
+    
+    def expand_tomograms(self, item, voxel_spacing):
+        """Lazily load tomograms."""
+        if not item.childCount():
+            # Load tomograms directly (no threading)
+            tomograms = voxel_spacing.tomograms
+            for tomogram in tomograms:
+                tomo_child = QTreeWidgetItem(item, [tomogram.meta.tomo_type])
+                tomo_child.setData(0, Qt.UserRole, tomogram)
+    
+    # Helper method to safely update UI from background thread
+    def update_ui_tomograms(self, callback):
+        callback()
+    
+    def expand_segmentations(self, item, voxel_spacing):
+        """Lazily load segmentations."""
+        if not item.childCount():
+            # Load segmentations directly (no threading)
+            segmentations = voxel_spacing.run.get_segmentations(
+                voxel_size=voxel_spacing.meta.voxel_size
+            )
+            for segmentation in segmentations:
+                seg_child = QTreeWidgetItem(item, [segmentation.meta.name])
+                seg_child.setData(0, Qt.UserRole, segmentation)
+    
+    # Helper method to safely update UI from background thread
+    def update_ui_segmentations(self, callback):
+        callback()
 
     def handle_item_click(self, item, column):
         data = item.data(0, Qt.UserRole)
@@ -618,50 +750,34 @@ class CopickPlugin(QWidget):
         print(f"Layer data shape: {layer.data.shape}")
         print(f"Layer selected label: {layer.selected_label}")
         
-        # Define the callback function for label changes with enhanced debugging
+        # Create a queue if it doesn't exist
+        if not hasattr(self, 'update_queue'):
+            import queue
+            self.update_queue = queue.Queue()
+            self.worker_thread = threading.Thread(target=self.process_update_queue, daemon=True)
+            self.worker_thread.start()
+
+        # Define the callback function for label changes
         def on_data_changed(event):
-            # Extensive debug printing
-            print(f"\n---- PAINT EVENT DETECTED ----")
-            print(f"Event type: {type(event).__name__}")
-            print(f"Event source: {event.source}")
-            print(f"Event attributes: {[attr for attr in dir(event) if not attr.startswith('_')]}")
-            
             # Only handle data change events from this specific layer
             if event.source != layer:
-                print(f"Ignoring event from different source: {event.source}")
                 return
             
             # Try different approaches to get coordinates
             coordinates = None
             
-            # Approach 1: Direct coordinates from event
             if hasattr(event, 'coordinates') and event.coordinates is not None:
-                print(f"Found coordinates directly in event: {len(event.coordinates)} points")
                 coordinates = event.coordinates
-            
-            # Approach 2: Coordinates in event.data
             elif hasattr(event, 'data') and hasattr(event.data, 'coordinates') and event.data.coordinates is not None:
-                print(f"Found coordinates in event.data: {len(event.data.coordinates)} points")
                 coordinates = event.data.coordinates
-            
-            # Approach 3: Try to get from indices
             elif hasattr(event, 'indices') and event.indices is not None:
-                print(f"Using indices from event: {len(event.indices)} points")
                 coordinates = event.indices
-                
-            # Approach 4: For paint events
             elif hasattr(event, 'pos') and event.pos is not None:
-                print(f"Using position from paint event")
                 coordinates = [event.pos]
                 
             if coordinates is None or len(coordinates) == 0:
-                print("No coordinates found in event. Attempting to extract from layer data changes...")
-                # We might need a more sophisticated approach to detect which voxels changed
-                print("Cannot determine coordinates from this event type. Skipping.")
                 return
                 
-            print(f"Found {len(coordinates)} coordinates with label {layer.selected_label}")
-            
             # Convert coordinates to a list of [z, y, x] format
             coords = []
             for coord in coordinates:
@@ -670,14 +786,10 @@ class CopickPlugin(QWidget):
                     coords.append([int(coord[0]), int(coord[1]), int(coord[2])])
                     
             if len(coords) == 0:
-                print("No valid 3D coordinates found. Skipping.")
                 return
                 
-            print(f"Processed {len(coords)} valid coordinates")
-            
-            # Get current label - this is important!
+            # Get current label
             current_label = layer.selected_label
-            print(f"Current selected label: {current_label}")
             
             # Prepare the request data
             request_data = {
@@ -690,26 +802,8 @@ class CopickPlugin(QWidget):
                 'label': int(current_label)
             }
             
-            # Print request data for debugging (excluding coordinates for brevity)
-            debug_data = request_data.copy()
-            debug_data['coordinates'] = f"[{len(coords)} coordinates]"
-            print(f"Sending request data: {debug_data}")
-            
-            # Send the update to the server
-            print(f"Sending painting update to server...")
-            response = self.cellcanvas_client.send_request(
-                'api/painting/update',
-                params=request_data,
-                method='POST'
-            )
-            
-            if response and response.get('status') == 'success':
-                print(f"Successfully sent painting update to server")
-                print(f"Server response: {response}")
-            else:
-                print(f"Failed to send painting update to server")
-                if response:
-                    print(f"Server response: {response}")
+            # Add to queue instead of blocking with direct request
+            self.update_queue.put(('api/painting/update', request_data, 'POST'))
         
         # Connect to all relevant event types to ensure we catch painting operations
         print("Connecting event handlers...")
@@ -730,22 +824,6 @@ class CopickPlugin(QWidget):
             
         # Save a reference to the current painting layer callback
         self.painting_callback = on_data_changed
-        
-        print("Painting layer event listener setup completed with enhanced debugging")
-        
-        # Optional - add a test event to verify the callback works
-        print("\nTesting event callback with mock event...")
-        from types import SimpleNamespace
-        mock_event = SimpleNamespace(
-            source=layer,
-            coordinates=[[0, 0, 0]],
-            value=layer.selected_label
-        )
-        try:
-            on_data_changed(mock_event)
-            print("Test event processed successfully")
-        except Exception as e:
-            print(f"Error processing test event: {str(e)}")
 
     def load_segmentation(self, segmentation):
         zarr_data = zarr.open(segmentation.zarr(), "r+")
@@ -1031,6 +1109,15 @@ class CopickPlugin(QWidget):
             self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
             return False
 
+def cleanup(self):
+    """Clean up threads and resources."""
+    # Signal the worker thread to exit
+    if hasattr(self, 'update_queue'):
+        self.update_queue.put(None)  # Sentinel value
+    
+    # Shutdown the thread pool
+    if hasattr(self, 'executor'):
+        self.executor.shutdown(wait=False)
 
 if __name__ == "__main__":
     import argparse
@@ -1057,6 +1144,12 @@ if __name__ == "__main__":
     copick_plugin.cellcanvas_settings['server_url'] = args.server_url
     copick_plugin.cellcanvas_client = CellCanvasClient(args.server_url)
     copick_plugin.cellcanvas_status_label.setText(f"CellCanvas: Connected to {args.server_url}")
+    
+    viewer.window.add_dock_widget(copick_plugin, area="right")
+    napari.run()
+
+    import atexit
+    atexit.register(copick_plugin.cleanup)
     
     viewer.window.add_dock_widget(copick_plugin, area="right")
     napari.run()
