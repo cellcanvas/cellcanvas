@@ -20,6 +20,7 @@
 # dependencies = [
 #     "napari[all]",
 #     "zarr<3",
+#     "fsspec @ git+https://github.com/kephale/filesystem_spec@http_pipe_file",
 #     "napari-copick @ git+https://github.com/kephale/napari-copick.git",
 #     "requests",
 #     "numpy",
