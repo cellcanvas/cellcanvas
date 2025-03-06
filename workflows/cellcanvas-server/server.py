@@ -15,11 +15,13 @@
 #     "Topic :: Scientific/Engineering :: Bio-Informatics",
 #     "Topic :: Scientific/Engineering :: Visualization",
 # ]
-# requires-python = ">=3.9"
+# requires-python = ">=3.10"
 # dependencies = [
 #     "numpy",
 #     "torch",
 #     "copick",
+#     "pandas",
+#     "cellcanvas-spp @ file:///Users/kharrington/git/cellcanvas/superpixels",
 #     "copick-server @ file:///Users/kharrington/git/copick/copick-server",
 #     "copick-utils @ git+https://github.com/copick/copick-utils",
 #     "click",
@@ -29,6 +31,7 @@
 # ]
 # ///
 
+#     "cellcanvas-spp @ git+https://github.com/cellcanvas/superpixels",
 #     "copick-server @ git+https://github.com/kephale/copick-server",
 
 import os
@@ -43,6 +46,12 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.requests import Request
+
+from cellcanvas_spp.segmentation import superpixels, superpixels_hws
+import numpy as np
+import zarr
+from skimage.measure import regionprops_table
+import pandas as pd
 
 # Import original Copick server components
 from copick_server.server import CopickRoute, create_copick_app
@@ -471,6 +480,308 @@ class CellCanvasRoute:
             traceback.print_exc()
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def create_superpixel_segmentation(self, request):
+        """Create a superpixel segmentation for a tomogram in the Copick project."""
+        print("\n==== RECEIVED CREATE SUPERPIXEL SEGMENTATION REQUEST ====")
+        try:
+            # Parse JSON data
+            data = await request.json()
+            print(f"Parsed JSON data keys: {list(data.keys())}")
+            
+            # Extract data from request
+            run_name = data.get('run_name')
+            voxel_size = data.get('voxel_size')
+            tomogram_type = data.get('tomogram_type', 'wbp')  # Default to wbp
+            user_id = data.get('user_id', 'cellcanvasSPP')
+            session_id = data.get('session_id', '0')
+            segmentation_name = data.get('segmentation_name', 'superpixelSegmentation')
+            
+            # Superpixel parameters
+            sigma = data.get('sigma', 0.25)
+            h_minima = data.get('h_minima', None)
+            use_hws = data.get('use_hws', True)  # Default to hierarchical watershed
+            
+            # Optional crop parameters
+            crop_z = data.get('crop_z')
+            crop_y = data.get('crop_y')
+            crop_x = data.get('crop_x')
+            
+            # Validate input
+            if not run_name:
+                return JSONResponse({"error": "Missing run_name parameter"}, status_code=400)
+            if not voxel_size:
+                return JSONResponse({"error": "Missing voxel_size parameter"}, status_code=400)
+            
+            print(f"Creating superpixel segmentation for run {run_name}, voxel size {voxel_size}")
+            
+            # Get the run
+            run = self.root.get_run(run_name)
+            if run is None:
+                return JSONResponse({"error": f"Run {run_name} not found"}, status_code=404)
+            
+            # Get the voxel spacing
+            vs = run.get_voxel_spacing(voxel_size)
+            if vs is None:
+                return JSONResponse({"error": f"Voxel spacing {voxel_size} not found"}, status_code=404)
+            
+            # Get the tomogram
+            tomogram = None
+            for tomo in vs.tomograms:
+                if tomo.meta.tomo_type == tomogram_type:
+                    tomogram = tomo
+                    break
+            
+            if tomogram is None:
+                return JSONResponse({"error": f"Tomogram {tomogram_type} not found"}, status_code=404)
+            
+            # Check if segmentation already exists
+            existing_segs = run.get_segmentations(
+                voxel_size=voxel_size,
+                name=segmentation_name,
+                user_id=user_id,
+                session_id=session_id,
+                is_multilabel=True
+            )
+            
+            if existing_segs:
+                return JSONResponse({
+                    "status": "exists",
+                    "message": f"Segmentation '{segmentation_name}' already exists",
+                    "segmentation_path": str(existing_segs[0].zarr())
+                }, status_code=200)
+            
+            # Open tomogram data
+            tomo_zarr = zarr.open(tomogram.zarr(), "r")
+            # Find data array
+            data_array = None
+            for key in tomo_zarr.keys():
+                if isinstance(tomo_zarr[key], zarr.core.Array):
+                    data_array = tomo_zarr[key]
+                    break
+            
+            if data_array is None:
+                return JSONResponse({"error": "Could not find data array in tomogram"}, status_code=500)
+            
+            print(f"Loading tomogram data with shape {data_array.shape}")
+            
+            # Apply crop if specified
+            if crop_z or crop_y or crop_x:
+                z_slice = slice(*crop_z) if crop_z else slice(None)
+                y_slice = slice(*crop_y) if crop_y else slice(None)
+                x_slice = slice(*crop_x) if crop_x else slice(None)
+                
+                img = data_array[z_slice, y_slice, x_slice]
+                print(f"Cropped tomogram to shape {img.shape}")
+            else:
+                # Load the entire image (this could be memory-intensive for large tomograms)
+                img = data_array[:]
+            
+            # Perform superpixel segmentation
+            print(f"Performing superpixel segmentation with {'HWS' if use_hws else 'standard'} method, sigma={sigma}")
+            
+            if use_hws:
+                segm = superpixels_hws(img, sigma=sigma)
+            else:
+                if h_minima is None:
+                    h_minima = 0.0025  # Default value
+                segm = superpixels(img, sigma=sigma, h_minima=h_minima)
+            
+            print(f"Superpixel segmentation complete with {np.max(segm)} regions")
+            
+            # Create new segmentation
+            new_seg = run.new_segmentation(
+                voxel_size=voxel_size,
+                name=segmentation_name,
+                session_id=session_id,
+                is_multilabel=True,
+                user_id=user_id
+            )
+            
+            # Save segmentation to zarr
+            segmentation_zarr = zarr.open(new_seg.zarr(), mode="w")
+            segmentation_zarr.create_dataset(
+                "data",
+                data=segm,
+                chunks=(128, 128, 128)
+            )
+            
+            print(f"Segmentation saved to {new_seg.zarr()}")
+            
+            # Return success response
+            return JSONResponse({
+                "status": "success",
+                "message": "Superpixel segmentation created successfully",
+                "segmentation_info": {
+                    "name": segmentation_name,
+                    "path": str(new_seg.zarr()),
+                    "region_count": int(np.max(segm)),
+                    "shape": list(segm.shape)
+                }
+            }, status_code=200)
+            
+        except Exception as e:
+            print(f"Error creating superpixel segmentation: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def compute_superpixel_dataframe(self, request):
+        """Compute region properties for superpixel segmentation and return as dataframe."""
+        print("\n==== RECEIVED COMPUTE SUPERPIXEL DATAFRAME REQUEST ====")
+        try:
+            # Parse JSON data
+            data = await request.json()
+            print(f"Parsed JSON data keys: {list(data.keys())}")
+            
+            # Extract data from request
+            run_name = data.get('run_name')
+            voxel_size = data.get('voxel_size')
+            tomogram_type = data.get('tomogram_type', 'wbp')
+            segmentation_name = data.get('segmentation_name', 'superpixelSegmentation')
+            user_id = data.get('user_id', 'cellcanvasSPP')
+            session_id = data.get('session_id', '0')
+            
+            # Optional crop parameters
+            crop_z = data.get('crop_z')
+            crop_y = data.get('crop_y')
+            crop_x = data.get('crop_x')
+            
+            # Properties to compute
+            properties = data.get('properties', [
+                'label', 'area', 'bbox', 'bbox_area', 'centroid', 'equivalent_diameter', 'euler_number',
+                'extent', 'filled_area', 'major_axis_length', 'max_intensity', 'mean_intensity', 
+                'min_intensity'
+            ])
+            
+            # Validate input
+            if not run_name:
+                return JSONResponse({"error": "Missing run_name parameter"}, status_code=400)
+            if not voxel_size:
+                return JSONResponse({"error": "Missing voxel_size parameter"}, status_code=400)
+            
+            print(f"Computing dataframe for superpixels in run {run_name}, voxel size {voxel_size}")
+            
+            # Get the run
+            run = self.root.get_run(run_name)
+            if run is None:
+                return JSONResponse({"error": f"Run {run_name} not found"}, status_code=404)
+            
+            # Get the segmentation
+            segs = run.get_segmentations(
+                voxel_size=voxel_size,
+                name=segmentation_name,
+                user_id=user_id,
+                session_id=session_id,
+                is_multilabel=True
+            )
+            
+            if not segs:
+                return JSONResponse({
+                    "error": f"Segmentation {segmentation_name} not found",
+                    "suggestion": "Create superpixel segmentation first using /api/superpixels/create"
+                }, status_code=404)
+            
+            # Get the tomogram for intensity measurements
+            vs = run.get_voxel_spacing(voxel_size)
+            if vs is None:
+                return JSONResponse({"error": f"Voxel spacing {voxel_size} not found"}, status_code=404)
+            
+            tomogram = None
+            for tomo in vs.tomograms:
+                if tomo.meta.tomo_type == tomogram_type:
+                    tomogram = tomo
+                    break
+            
+            if tomogram is None:
+                return JSONResponse({"error": f"Tomogram {tomogram_type} not found"}, status_code=404)
+            
+            # Open tomogram and segmentation data
+            segmentation_zarr = zarr.open(segs[0].zarr(), "r")
+            tomo_zarr = zarr.open(tomogram.zarr(), "r")
+            
+            # Find data arrays
+            seg_array = None
+            for key in segmentation_zarr.keys():
+                if isinstance(segmentation_zarr[key], zarr.core.Array):
+                    seg_array = segmentation_zarr[key]
+                    break
+                    
+            img_array = None
+            for key in tomo_zarr.keys():
+                if isinstance(tomo_zarr[key], zarr.core.Array):
+                    img_array = tomo_zarr[key]
+                    break
+            
+            if seg_array is None:
+                return JSONResponse({"error": "Could not find data array in segmentation"}, status_code=500)
+            if img_array is None:
+                return JSONResponse({"error": "Could not find data array in tomogram"}, status_code=500)
+            
+            # Apply crop if specified
+            if crop_z or crop_y or crop_x:
+                z_slice = slice(*crop_z) if crop_z else slice(None)
+                y_slice = slice(*crop_y) if crop_y else slice(None)
+                x_slice = slice(*crop_x) if crop_x else slice(None)
+                
+                seg = seg_array[z_slice, y_slice, x_slice]
+                img = img_array[z_slice, y_slice, x_slice]
+                print(f"Cropped data to shape {seg.shape}")
+            else:
+                # Load data in chunks if it's large
+                if seg_array.size > 100_000_000:  # ~100 million elements
+                    print("Segmentation is large, processing a subset for dataframe computation")
+                    # Get a representative subset
+                    mid_z = seg_array.shape[0] // 2
+                    subset_z = slice(max(0, mid_z - 50), min(seg_array.shape[0], mid_z + 50))
+                    seg = seg_array[subset_z, :, :]
+                    img = img_array[subset_z, :, :]
+                else:
+                    seg = seg_array[:]
+                    img = img_array[:]
+            
+            # Compute region properties
+            print(f"Computing region properties with properties: {properties}")
+            props = regionprops_table(seg, intensity_image=img, properties=properties)
+            props_df = pd.DataFrame(props)
+            
+            # Add a painted_label column initialized to 0
+            props_df['painted_label'] = 0
+            
+            # Convert centroid and bbox to serializable format if present
+            if 'centroid' in props_df.columns:
+                centroid_cols = [col for col in props_df.columns if col.startswith('centroid-')]
+                props_df['centroid'] = props_df[centroid_cols].values.tolist()
+                props_df = props_df.drop(columns=centroid_cols)
+            
+            if 'bbox' in props_df.columns:
+                bbox_cols = [col for col in props_df.columns if col.startswith('bbox-')]
+                props_df['bbox'] = props_df[bbox_cols].values.tolist()
+                props_df = props_df.drop(columns=bbox_cols)
+            
+            # Convert dataframe to serializable dictionary
+            result_dict = props_df.to_dict(orient='records')
+            
+            print(f"Region properties computed for {len(result_dict)} regions")
+            
+            # Return success response
+            return JSONResponse({
+                "status": "success",
+                "message": "Superpixel dataframe computed successfully",
+                "properties": list(props_df.columns),
+                "dataframe": result_dict,
+                "record_count": len(result_dict),
+                "segmentation_info": {
+                    "name": segmentation_name,
+                    "path": str(segs[0].zarr())
+                }
+            }, status_code=200)
+            
+        except Exception as e:
+            print(f"Error computing superpixel dataframe: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse({"error": str(e)}, status_code=500)
+
 def create_cellcanvas_copick_app(root, cors_origins=None):
     """Create a Starlette app that includes both Copick and CellCanvas routes."""
     # Create the route handlers
@@ -482,6 +793,10 @@ def create_cellcanvas_copick_app(root, cors_origins=None):
         Route("/ping", endpoint=cellcanvas_handler.ping, methods=["GET"]),
         Route("/api/painting/update", endpoint=cellcanvas_handler.handle_painting_update, methods=["POST"]),
         Route("/api/segmentation/ensure", endpoint=cellcanvas_handler.ensure_segmentation, methods=["POST"]),
+        
+        # New superpixel endpoints
+        Route("/api/superpixels/create", endpoint=cellcanvas_handler.create_superpixel_segmentation, methods=["POST"]),
+        Route("/api/superpixels/dataframe", endpoint=cellcanvas_handler.compute_superpixel_dataframe, methods=["POST"]),
         
         # Debug route
         Route("/debug", endpoint=lambda request: Response(
