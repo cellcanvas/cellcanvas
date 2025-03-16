@@ -826,14 +826,17 @@ def create_cellcanvas_copick_app(root, cors_origins=None):
     
     return app
 
-def serve_cellcanvas_copick(config_path, allowed_origins=None, **kwargs):
+def serve_cellcanvas_copick(config_path=None, allowed_origins=None, **kwargs):
     """Start an HTTP server serving a Copick project with CellCanvas extensions."""
-    root = copick.from_file(config_path)
+    if config_path:
+        root = copick.from_file(config_path)
+    else:
+        root = copick.from_czcdp_datasets([10440], overlay_root="/tmp/test/")
     app = create_cellcanvas_copick_app(root, allowed_origins)
     uvicorn.run(app, **kwargs)
 
 @click.command()
-@click.argument("config", type=click.Path(exists=True))
+@click.argument("config", type=click.Path(exists=True), required=False)
 @click.option(
     "--cors",
     type=str,
@@ -855,17 +858,17 @@ def serve_cellcanvas_copick(config_path, allowed_origins=None, **kwargs):
     show_default=True,
 )
 @click.option("--reload", is_flag=True, default=False, help="Enable auto-reload.")
-def main(config, cors, host, port, reload):
+def main(config=None, cors="*", host="127.0.0.1", port=8000, reload=False):
     """Serve a Copick project with CellCanvas features over HTTP."""
-    print(f"Starting CellCanvas-enabled Copick server with config: {config}")
-
-    serve_cellcanvas_copick(
-        config,
-        allowed_origins=[cors] if cors else ["*"],
-        host=host,
-        port=port,
-        reload=reload
-    )
+    if config:
+        print(f"Starting CellCanvas-enabled Copick server with config: {config}")
+        root = copick.from_file(config)
+    else:
+        print("No config provided, using default project with dataset 10440")
+        root = copick.from_czcdp_datasets([10440], overlay_root="/tmp/test/")
+    
+    app = create_cellcanvas_copick_app(root, [cors] if cors else ["*"])
+    uvicorn.run(app, host=host, port=port, reload=reload)
 
 if __name__ == "__main__":
     main()
