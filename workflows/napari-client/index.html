@@ -1,0 +1,688 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>napari-copick-cellcanvas - atrium.cellcanvas.org</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #1d4ed8;
+            --background-color: #f8fafc;
+            --card-background: #ffffff;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --border-color: #e2e8f0;
+            --code-background: #f1f5f9;
+            --tag-background: #e2e8f0;
+            --hover-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            --footer-background: var(--card-background);
+            --footer-text: var(--text-secondary);
+            --footer-link: var(--primary-color);
+        }
+
+        .footer {
+            background-color: var(--footer-background);
+            padding: 2rem 1rem;
+            margin-top: 4rem;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .footer-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            text-align: center;
+            color: var(--footer-text);
+        }
+
+        .footer-link {
+            color: var(--footer-link);
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s ease;
+        }
+
+        .footer-link:hover {
+            text-decoration: underline;
+        }
+
+        .footer-text {
+            font-size: 1.1rem;
+            line-height: 1.6;
+        }
+
+        .footer-heart {
+            color: #e25555;
+            display: inline-block;
+            animation: heartbeat 1.5s ease infinite;
+        }
+
+        @keyframes heartbeat {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --primary-color: #3b82f6;
+                --secondary-color: #60a5fa;
+                --background-color: #0f172a;
+                --card-background: #1e293b;
+                --text-primary: #f1f5f9;
+                --text-secondary: #94a3b8;
+                --border-color: #334155;
+                --code-background: #1e293b;
+                --tag-background: #334155;
+            }
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .nav-bar {
+            background-color: var(--card-background);
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-color);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            color: var(--text-secondary);
+            text-decoration: none;
+            gap: 0.5rem;
+            font-size: 0.95rem;
+        }
+
+        .back-link:hover {
+            color: var(--primary-color);
+        }
+
+        .script-section {
+            background: var(--card-background);
+            border-radius: 1rem;
+            padding: 2rem;
+            margin: 2rem 0;
+            border: 1px solid var(--border-color);
+        }
+
+        .script-header {
+            margin-bottom: 2rem;
+        }
+
+        .script-title {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .metadata-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin: 2rem 0;
+            padding: 1.5rem;
+            background: var(--code-background);
+            border-radius: 0.5rem;
+        }
+
+        .metadata-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .metadata-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .metadata-value {
+            font-size: 1rem;
+            color: var(--text-primary);
+            word-break: break-word;
+        }
+
+        .tags-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+        }
+
+        .tag {
+            background: var(--tag-background);
+            padding: 0.25rem 0.75rem;
+            border-radius: 1rem;
+            font-size: 0.875rem;
+            color: var(--text-primary);
+        }
+
+        .command-section {
+            background: var(--code-background);
+            padding: 1.5rem;
+            border-radius: 0.5rem;
+            margin: 2rem 0;
+            position: relative;
+        }
+
+        .command-title {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }
+
+        .command-box {
+            background: rgba(0, 0, 0, 0.1);
+            padding: 1rem;
+            border-radius: 0.5rem;
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            margin-bottom: 0.5rem;
+            overflow-x: auto;
+        }
+
+        .copy-button {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .copy-button:hover {
+            background: var(--secondary-color);
+        }
+
+        .description-section {
+            margin: 2rem 0;
+        }
+
+        .description-content {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            line-height: 1.8;
+        }
+
+        .dependencies-section {
+            margin: 2rem 0;
+        }
+
+        .dependencies-list {
+            list-style: none;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .dependency-item {
+            background: var(--code-background);
+            padding: 0.75rem 1rem;
+            border-radius: 0.5rem;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+
+        .links-section {
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .link-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--primary-color);
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .link-item:hover {
+            text-decoration: underline;
+        }
+
+
+
+                .metadata-section {
+            background: var(--card-background);
+            border-radius: 1rem;
+            padding: 2rem;
+            margin: 2rem 0;
+            border: 1px solid var(--border-color);
+        }
+
+        .metadata-title {
+            font-size: 1.2rem;
+            margin-bottom: 1.5rem;
+            color: var(--text-primary);
+        }
+
+        .metadata-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .metadata-item {
+            padding: 1rem;
+            background: var(--code-background);
+            border-radius: 0.5rem;
+        }
+
+        .metadata-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .metadata-value {
+            font-size: 1rem;
+            color: var(--text-primary);
+            word-break: break-word;
+        }
+
+        .tags-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .tag {
+            background: var(--tag-background);
+            padding: 0.25rem 0.75rem;
+            border-radius: 1rem;
+            font-size: 0.875rem;
+            color: var(--text-primary);
+        }
+
+        .cover-image-container {
+            margin: 2rem 0;
+            width: 100%;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .card-image {
+            width: 100%;
+            height: auto;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            display: block;  /* Ensure image is block-level */
+            margin: 0 auto;  /* Center the image */
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .card-image {
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1);
+            }
+        }        
+        
+        .logo-image {
+            height: 80px;
+            width: auto;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            padding: 1rem;
+            color: white;
+            position: relative;
+        }
+
+        .header-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 2rem;
+        }
+
+        .header-logo {
+            flex-shrink: 0;
+        }
+
+        .logo-image {
+            height: 80px;
+            width: auto;
+            display: block;
+        }
+
+        .header-text {
+            flex-grow: 1;
+            text-align: left;
+        }
+
+        .header-title {
+            font-size: 2.5rem;
+            margin-bottom: 0;
+            font-weight: 800;
+        }    
+
+        .header {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            padding: 2rem;
+            color: white;
+            position: relative;
+        }
+
+        .solution-header-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            align-items: flex-start;
+            gap: 2rem;
+        }
+
+        .solution-header-logo {
+            flex-shrink: 0;
+        }
+
+        .solution-header-text {
+            flex-grow: 1;
+        }
+
+        .solution-title {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            font-weight: 800;
+        }
+
+        .solution-subtitle {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            line-height: 1.4;
+            max-width: 800px;
+        }
+
+        @media (max-width: 768px) {
+            .header-banner,
+            .header {
+                padding: 1.5rem;
+            }
+            
+            .header-content,
+            .solution-header-content {
+                flex-direction: column;
+                align-items: center;
+                text-align: center;
+            }
+            
+            .header-text,
+            .solution-header-text {
+                text-align: center;
+            }
+            
+            .header-title,
+            .solution-title {
+                font-size: 2rem;
+            }
+            
+            .header-subtitle,
+            .solution-subtitle {
+                font-size: 1.1rem;
+            }
+            
+            .logo-image {
+                height: 60px;
+            }
+        }
+
+        .cli-arguments-section {
+            margin: 2rem 0;
+        }
+
+        .cli-arg-item {
+            background: var(--code-background);
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .cli-arg-item code {
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+
+        .arg-type {
+            color: var(--text-secondary);
+            margin-left: 0.5rem;
+        }
+
+        .arg-help {
+            margin-top: 0.5rem;
+            color: var(--text-primary);
+        }
+
+        .arg-default {
+            margin-top: 0.25rem;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="solution-header-content">
+            <a href="../../index.html" class="solution-header-logo">
+                <img src="../../icon_transparent.png" alt=" Logo" class="logo-image">
+            </a>
+            <div class="solution-header-text">
+                <h1 class="solution-title"></h1>
+                <p class="solution-subtitle"></p>
+            </div>
+        </div>
+    </header>
+
+    <nav class="nav-bar">
+        <div class="container">
+            <a href="../../index.html" class="back-link">
+                <i class="fas fa-arrow-left"></i>
+                Back to Scripts
+            </a>
+        </div>
+    </nav>
+
+    <main class="container">
+        <section class="script-section">
+            <div class="script-header">
+                <h1 class="script-title">napari-copick-cellcanvas</h1><div class="description-section">
+                    <p class="description-content"></p>
+                </div>
+
+                <div class="metadata-grid">
+                    <div class="metadata-item">
+                        <div class="metadata-label">
+                            <i class="fas fa-code-branch"></i>
+                            Version
+                        </div>
+                        <div class="metadata-value">0.1.0</div>
+                    </div>
+                    
+
+                    
+                    <div class="metadata-item">
+                        <div class="metadata-label">
+                            <i class="fas fa-user"></i>
+                            Author
+                        </div>
+                        <div class="metadata-value">Kyle Harrington <napari@kyleharrington.com></div>
+                    </div>
+                    
+
+                    
+                    <div class="metadata-item">
+                        <div class="metadata-label">
+                            <i class="fas fa-balance-scale"></i>
+                            License
+                        </div>
+                        <div class="metadata-value">MIT</div>
+                    </div>
+                    
+
+                    
+
+                    
+                    <div class="metadata-item">
+                        <div class="metadata-label">
+                            <i class="fas fa-tags"></i>
+                            Keywords
+                        </div>
+                        <div class="tags-container">
+                            
+                            <span class="tag">napari</span>
+                            
+                            <span class="tag">copick</span>
+                            
+                            <span class="tag">cellcanvas</span>
+                            
+                            <span class="tag">visualization</span>
+                            
+                            <span class="tag">plugin</span>
+                            
+                            <span class="tag">tomography</span>
+                            
+                            <span class="tag">cryo-EM</span>
+                            
+                        </div>
+                    </div>
+                    
+                </div>
+            </div>
+
+            <div class="command-section">
+                <h2 class="command-title">Run this script</h2>
+                <div class="command-box">
+                    <code>uv run https://atrium.cellcanvas.org/workflows/napari-client/client.py</code>
+                </div>
+                <button class="copy-button" onclick="copyCommand()">
+                    <i class="fas fa-copy"></i>
+                    Copy Command
+                </button>
+            </div>
+
+            
+
+            
+            <div class="dependencies-section">
+                <h2>Dependencies</h2>
+                <ul class="dependencies-list">
+                    
+                    <li class="dependency-item">napari[all]</li>
+                    
+                    <li class="dependency-item">zarr<3</li>
+                    
+                    <li class="dependency-item">fsspec @ git+https://github.com/kephale/filesystem_spec@http_pipe_file</li>
+                    
+                    <li class="dependency-item">napari-copick @ git+https://github.com/kephale/napari-copick.git</li>
+                    
+                    <li class="dependency-item">requests</li>
+                    
+                    <li class="dependency-item">numpy</li>
+                    
+                    <li class="dependency-item">matplotlib</li>
+                    
+                </ul>
+            </div>
+            
+
+            <div class="links-section">
+                <a href="./source.html" class="link-item">
+                    <i class="fas fa-code"></i>
+                    View Source Code
+                </a>
+
+                
+                <a href="https://github.com/kephale/napari-copick" target="_blank" class="link-item">
+                    <i class="fab fa-github"></i>
+                    Repository
+                </a>
+                
+
+                
+                <a href="https://github.com/kephale/napari-copick#readme" target="_blank" class="link-item">
+                    <i class="fas fa-book"></i>
+                    Documentation
+                </a>
+                
+
+                
+                <a href="https://napari.org" target="_blank" class="link-item">
+                    <i class="fas fa-home"></i>
+                    Homepage
+                </a>
+                
+
+                
+            </div></section>
+    </main>
+
+    <script>
+        function copyCommand() {
+            const command = document.querySelector('.command-box code').textContent;
+            navigator.clipboard.writeText(command).then(() => {
+                const button = document.querySelector('.copy-button');
+                const originalText = button.innerHTML;
+                button.innerHTML = '<i class="fas fa-check"></i> Copied!';
+                setTimeout(() => {
+                    button.innerHTML = originalText;
+                }, 2000);
+            });
+        }
+    </script>
+    <footer class="footer">
+        <div class="footer-content">
+            <p class="footer-text">
+                Built with <span class="footer-heart">♥</span> using 
+                <a href="https://github.com/kephale/atrium" class="footer-link" target="_blank">
+                    Atrium
+                </a>
+            </p>
+        </div>
+    </footer>
+</body>
+</html>
