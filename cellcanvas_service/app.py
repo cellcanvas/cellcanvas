@@ -3,6 +3,7 @@
 Operations run in worker threads and serialize per dataset. A disconnected
 request does not cancel core execution. Models live in memory; prediction
 arrays are persisted by core, whose writes can be partial after a failure.
+Operation receipts are retained in memory for this service instance only.
 """
 
 from dataclasses import dataclass, field
@@ -62,7 +63,7 @@ class DatasetState:
         from zarr.storage import LocalStore
 
         def location(array):
-            if isinstance(array.store, LocalStore):
+            if isinstance(getattr(array, "store", None), LocalStore):
                 return {"uri": array.store.root.resolve().as_uri(), "path": array.path}
             return None
 

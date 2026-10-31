@@ -351,3 +351,12 @@ def test_failed_operation_receipt_is_retrievable(case_factory, serve):
         assert not client.get("/datasets/demo").json()["busy"]
         assert client.get(f"/datasets/demo/operations/{uuid4().hex}").status_code == 404
         assert client.post("/datasets/demo/train", json=dict(body, operation_id="bad")).status_code == 400
+
+
+def test_memory_datasets_have_no_local_store_location(serve):
+    dataset = DataSet(np.zeros((1, 1, 2, 2)), {"f": np.ones((1, 1, 2, 2))},
+                      np.zeros((1, 2, 2), dtype="i4"), np.zeros((1, 2, 2), dtype="i4"))
+    with httpx.Client(base_url=serve({"demo": dataset})) as client:
+        response = client.get("/datasets/demo")
+        assert response.status_code == 200
+        assert response.json()["storage"] == {"image": None, "painting": None, "prediction": None, "features": [None]}
