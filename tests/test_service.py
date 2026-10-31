@@ -279,3 +279,75 @@ def test_cli_serves_configured_datasets(case_factory, tmp_path):
             process.terminate()
             process.wait(timeout=10)
     np.testing.assert_array_equal(DataSet.from_paths(**case.options).segmentation[:], case.expected)
+
+
+def test_storage_locations_identify_equal_shaped_datasets(case_factory, serve):
+    first, second = case_factory(), case_factory()
+    with httpx.Client(base_url=serve({"first": first.dataset, "second": second.dataset})) as client:
+        one, two = client.get("/datasets").json()["datasets"].values()
+        assert one["image"] == two["image"]
+        assert one["storage"] != two["storage"]
+        assert one["storage"]["image"] == {"uri": Path(first.options["image_path"]).as_uri(), "path": "0"}
+        assert one["storage"]["painting"] == {"uri": Path(first.options["labels_path"]).as_uri(), "path": ""}
+        assert one["service_id"] == two["service_id"]
+
+
+def test_operation_receipt_survives_missing_reply_and_deduplicates(case_factory, serve):
+    from uuid import uuid4
+    case = case_factory()
+    started, release = Event(), Event()
+    calls = []
+
+    class Manager:
+        def fit(self):
+            calls.append(True)
+            started.set()
+            release.wait(10)
+
+    with httpx.Client(base_url=serve({"demo": case.dataset}, manager_factory=lambda data: Manager()), timeout=3) as client:
+        metadata = client.get("/datasets/demo").json()
+        identifier = uuid4().hex
+        body = {"operation_id": identifier, "service_id": metadata["service_id"]}
+        try:
+            assert client.post("/datasets/demo/train", json=body).status_code == 202
+            assert started.wait(2)
+            # Treat the first reply as lost and retry the same receipt.
+            assert client.post("/datasets/demo/train", json=body).json()["state"] == "running"
+            assert client.get(f"/datasets/demo/operations/{identifier}").json()["state"] == "running"
+            assert client.get("/datasets/demo").json()["busy"]
+            assert len(calls) == 1
+            assert client.post("/datasets/demo/predict", json=body).status_code == 409
+        finally:
+            release.set()
+        deadline = time.monotonic() + 5
+        while True:
+            receipt = client.get(f"/datasets/demo/operations/{identifier}").json()
+            if receipt["state"] == "succeeded":
+                break
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        assert receipt["result"]["trained"]
+        assert client.post("/datasets/demo/train", json=body).json()["state"] == "succeeded"
+        assert len(calls) == 1
+        assert client.post("/datasets/demo/train", json=dict(body, service_id=uuid4().hex)).json()["code"] == "service_changed"
+
+
+def test_failed_operation_receipt_is_retrievable(case_factory, serve):
+    from uuid import uuid4
+    case = case_factory(painted=False)
+    with httpx.Client(base_url=serve({"demo": case.dataset}), timeout=5) as client:
+        metadata = client.get("/datasets/demo").json()
+        identifier = uuid4().hex
+        body = {"operation_id": identifier, "service_id": metadata["service_id"]}
+        assert client.post("/datasets/demo/train", json=body).status_code == 202
+        deadline = time.monotonic() + 5
+        while True:
+            receipt = client.get(f"/datasets/demo/operations/{identifier}").json()
+            if receipt["state"] == "failed":
+                break
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        assert receipt["error"]["code"] == "core_error"
+        assert not client.get("/datasets/demo").json()["busy"]
+        assert client.get(f"/datasets/demo/operations/{uuid4().hex}").status_code == 404
+        assert client.post("/datasets/demo/train", json=dict(body, operation_id="bad")).status_code == 400
