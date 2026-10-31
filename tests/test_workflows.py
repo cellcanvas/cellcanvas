@@ -8,9 +8,10 @@ import time
 from pathlib import Path
 from threading import Event, Thread, get_ident
 
-import copick
-import numpy as np
 import pytest
+
+copick = pytest.importorskip("copick", reason="Legacy workflow tests require the server/client extras")
+import numpy as np
 import requests
 import uvicorn
 import zarr

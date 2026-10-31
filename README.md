@@ -9,3 +9,7 @@ Run `python workflows/cellcanvas-server/server.py CONFIG.json`, then
 `python workflows/napari-client/client.py --config_path CONFIG.json`.
 These legacy workflows use Zarr 2; the local napari-cellcanvas workflow uses Zarr 3.
 Superpixel creation needs the optional `cellcanvas-spp` package.
+
+For the headless Zarr 3 service, install `pip install '.[service]'` in a separate environment.
+Run `python -m cellcanvas_service CONFIG.json`; `"datasets"` maps names to core `DataSet.from_paths` arguments (paths are relative to the working directory).
+Use `GET /datasets`, `POST /datasets/NAME/train` and `POST /datasets/NAME/predict` with optional `{"batch_size": 65536}`.

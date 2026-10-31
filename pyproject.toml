@@ -29,13 +29,18 @@ client = [
     "superqt>=0.7",
 ]
 test = ["pytest>=8", "httpx>=0.27"]
+service = [
+    "cellcanvas-core @ git+https://github.com/cellcanvas/cellcanvas-core.git@3095532cf6d5b13e73e55ec08c2e2d9bc95b1645",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = []
+packages = ["cellcanvas_service"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
