@@ -580,7 +580,9 @@ class CopickPlugin(QWidget):
             # Try to reconnect
             if not self.cellcanvas_client.test_connection():
                 print("Error: Cannot connect to CellCanvas server. Segmentations will not be synchronized.")
+                self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
                 return False
+        self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
         
         # Prepare the request data
         request_data = {

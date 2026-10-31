@@ -177,6 +177,7 @@ def painting_client(client_module, live_server, project, app, wait_for):
     widget.root = project[0]
     widget.cellcanvas_client = client_module["CellCanvasClient"](live_server)
     assert widget.ensure_and_load_segmentations("run-one", 2.0, "wbp")
+    assert "Connected to" in widget.cellcanvas_status_label.text()
     yield widget
     if widget.painting_sync is not None and widget.painting_sync.failed:
         widget.painting_sync.retry()
