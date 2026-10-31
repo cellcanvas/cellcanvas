@@ -1,6 +1,6 @@
 # /// script
 # title = "CellCanvas-enabled Copick Server"
-# description = "Run a Copick server with CellCanvas VAE feature extraction and reconstruction capabilities"
+# description = "Serve Copick data and painting updates, with optional superpixel operations."
 # author = "Kyle Harrington"
 # license = "MIT"
 # version = "0.1.0"
@@ -17,22 +17,17 @@
 # ]
 # requires-python = ">=3.10"
 # dependencies = [
-#     "numpy",
-#     "torch",
-#     "copick",
+#     "numpy>=2",
+#     "copick>=1.31,<2",
 #     "pandas",
-#     "cellcanvas-spp @ file:///Users/kharrington/git/cellcanvas/superpixels",
-#     "copick-server @ file:///Users/kharrington/git/copick/copick-server",
-#     "copick-utils @ git+https://github.com/copick/copick-utils",
+#     "copick-server @ git+https://github.com/copick/copick-server@1d9b7666685d211d384617f7892aabe15929230d",
 #     "click",
 #     "uvicorn",
 #     "starlette",
+#     "scikit-image",
 #     "zarr<3",
 # ]
 # ///
-
-#     "cellcanvas-spp @ git+https://github.com/cellcanvas/superpixels",
-#     "copick-server @ git+https://github.com/kephale/copick-server",
 
 import os
 import json
@@ -47,14 +42,12 @@ from starlette.responses import Response, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.requests import Request
 
-from cellcanvas_spp.segmentation import superpixels, superpixels_hws
-import numpy as np
 import zarr
 from skimage.measure import regionprops_table
 import pandas as pd
 
 # Import original Copick server components
-from copick_server.server import CopickRoute, create_copick_app
+from copick_server.server import CopickRoute
 
 def import_time():
     """Helper function to import time module and return current time."""
@@ -482,6 +475,11 @@ class CellCanvasRoute:
 
     async def create_superpixel_segmentation(self, request):
         """Create a superpixel segmentation for a tomogram in the Copick project."""
+        try:
+            from cellcanvas_spp.segmentation import superpixels, superpixels_hws
+        except ImportError:
+            return JSONResponse({"error": "Superpixel creation requires cellcanvas-spp and its native dependencies"},
+                                status_code=503)
         print("\n==== RECEIVED CREATE SUPERPIXEL SEGMENTATION REQUEST ====")
         try:
             # Parse JSON data
@@ -787,6 +785,9 @@ def create_cellcanvas_copick_app(root, cors_origins=None):
     # Create the route handlers
     copick_handler = CopickRoute(root)
     cellcanvas_handler = CellCanvasRoute(root)
+
+    async def serve_copick_path(request):
+        return await copick_handler.handle_request(request, request.path_params["path"])
     
     routes = [
         # CellCanvas specific routes
@@ -808,7 +809,7 @@ def create_cellcanvas_copick_app(root, cors_origins=None):
         )),
 
         # Original Copick catchall route - KEEP AT END
-        Route("/{path:path}", endpoint=copick_handler.handle_request, methods=["GET", "HEAD", "PUT"]),
+        Route("/{path:path}", endpoint=serve_copick_path, methods=["GET", "HEAD", "PUT"]),
     ]
     
     # Create Starlette app
