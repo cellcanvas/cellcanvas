@@ -16,15 +16,15 @@
 #     "Topic :: Scientific/Engineering :: Visualization",
 #     "Topic :: Scientific/Engineering :: Bio-Informatics",
 # ]
-# requires-python = ">=3.12"
+# requires-python = ">=3.11"
 # dependencies = [
-#     "napari[all]",
+#     "napari>=0.9,<1",
+#     "PySide6>=6.7,<7",
+#     "copick>=1.31,<2",
 #     "zarr<3",
-#     "fsspec @ git+https://github.com/kephale/filesystem_spec@http_pipe_file",
-#     "napari-copick @ git+https://github.com/kephale/napari-copick.git",
+#     "fsspec[http]",
 #     "requests",
 #     "numpy",
-#     "matplotlib",
 # ]
 # ///
 
@@ -50,7 +50,6 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QLineEdit,
     QMenu,
-    QAction,
     QFormLayout,
     QComboBox,
     QSpinBox,
@@ -1109,15 +1108,16 @@ class CopickPlugin(QWidget):
             self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
             return False
 
-def cleanup(self):
-    """Clean up threads and resources."""
-    # Signal the worker thread to exit
-    if hasattr(self, 'update_queue'):
-        self.update_queue.put(None)  # Sentinel value
-    
-    # Shutdown the thread pool
-    if hasattr(self, 'executor'):
-        self.executor.shutdown(wait=False)
+    def cleanup(self):
+        """Ask the update worker to stop and release the executor."""
+        if hasattr(self, 'update_queue'):
+            self.update_queue.put(None)
+        if hasattr(self, 'executor'):
+            self.executor.shutdown(wait=False)
+
+    def closeEvent(self, event):
+        self.cleanup()
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     import argparse
@@ -1146,10 +1146,7 @@ if __name__ == "__main__":
     copick_plugin.cellcanvas_status_label.setText(f"CellCanvas: Connected to {args.server_url}")
     
     viewer.window.add_dock_widget(copick_plugin, area="right")
-    napari.run()
-
-    import atexit
-    atexit.register(copick_plugin.cleanup)
-    
-    viewer.window.add_dock_widget(copick_plugin, area="right")
-    napari.run()
+    try:
+        napari.run()
+    finally:
+        copick_plugin.cleanup()
