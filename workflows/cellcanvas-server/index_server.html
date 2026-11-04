@@ -7,7 +7,7 @@
     <title>CellCanvas-enabled Copick Server - atrium.cellcanvas.org</title>
     <!-- Open Graph / Social Media Meta Tags -->
     <meta property="og:title" content="CellCanvas-enabled Copick Server - atrium.cellcanvas.org">
-    <meta property="og:description" content="Run a Copick server with CellCanvas VAE feature extraction and reconstruction capabilities">
+    <meta property="og:description" content="Serve Copick data and painting updates, with optional superpixel operations.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://atrium.cellcanvas.org/workflows/cellcanvas-server/">
     
@@ -15,7 +15,7 @@
     
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="CellCanvas-enabled Copick Server - atrium.cellcanvas.org">
-    <meta name="twitter:description" content="Run a Copick server with CellCanvas VAE feature extraction and reconstruction capabilities">
+    <meta name="twitter:description" content="Serve Copick data and painting updates, with optional superpixel operations.">
     
     <meta name="twitter:image" content="https://atrium.cellcanvas.org/icon_transparent.png">
     
@@ -660,25 +660,21 @@
                 <h2>Dependencies</h2>
                 <ul class="dependencies-list">
                     
-                    <li class="dependency-item">numpy</li>
+                    <li class="dependency-item">numpy>=2</li>
                     
-                    <li class="dependency-item">torch</li>
-                    
-                    <li class="dependency-item">copick</li>
+                    <li class="dependency-item">copick>=1.31,<2</li>
                     
                     <li class="dependency-item">pandas</li>
                     
-                    <li class="dependency-item">cellcanvas-spp @ file:///Users/kharrington/git/cellcanvas/superpixels</li>
-                    
-                    <li class="dependency-item">copick-server @ file:///Users/kharrington/git/copick/copick-server</li>
-                    
-                    <li class="dependency-item">copick-utils @ git+https://github.com/copick/copick-utils</li>
+                    <li class="dependency-item">copick-server @ git+https://github.com/copick/copick-server@1d9b7666685d211d384617f7892aabe15929230d</li>
                     
                     <li class="dependency-item">click</li>
                     
                     <li class="dependency-item">uvicorn</li>
                     
                     <li class="dependency-item">starlette</li>
+                    
+                    <li class="dependency-item">scikit-image</li>
                     
                     <li class="dependency-item">zarr<3</li>
                     

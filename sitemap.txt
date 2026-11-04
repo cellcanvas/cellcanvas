@@ -1,15 +1,15 @@
 Group: workflows
 Name: CellCanvas-enabled Copick Server
-Description: Run a Copick server with CellCanvas VAE feature extraction and reconstruction capabilities
+Description: Serve Copick data and painting updates, with optional superpixel operations.
 URL: https://atrium.cellcanvas.org/workflows/cellcanvas-server
-
-Group: workflows
-Name: napari-copick-cellcanvas
-Description: A Python script to launch napari with the napari-copick plugin integrated with CellCanvas server.
-URL: https://atrium.cellcanvas.org/workflows/napari-client
 
 Group: workflows
 Name: cellcanvas
 Description: Run CellCanvas, a tool for cellular image analysis.
 URL: https://atrium.cellcanvas.org/workflows/cellcanvas-prototype
+
+Group: workflows
+Name: napari-copick-cellcanvas
+Description: A Python script to launch napari with the napari-copick plugin integrated with CellCanvas server.
+URL: https://atrium.cellcanvas.org/workflows/napari-client
 
