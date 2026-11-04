@@ -279,3 +279,33 @@ def test_cli_serves_configured_datasets(case_factory, tmp_path):
             process.terminate()
             process.wait(timeout=10)
     np.testing.assert_array_equal(DataSet.from_paths(**case.options).segmentation[:], case.expected)
+
+
+def test_config_selects_the_model(case_factory, tmp_path):
+    from cellcanvas_service.__main__ import app_from_config
+    from cellcanvas_service.app import MODELS, fewshot_manager, manager_factory_for
+
+    case = case_factory()
+    paths = {k: v for k, v in case.options.items() if k.endswith("_path")}
+    app = app_from_config({"datasets": {"demo": paths}})
+    assert type(app.state.datasets["demo"].manager.model).__name__ == "RandomForestClassifier"
+    assert manager_factory_for() is MODELS["rf"] and manager_factory_for("fewshot") is fewshot_manager
+    for bad in ({"datasets": {"demo": paths}, "model": "svm"}, {"datasets": {"demo": paths}, "extra": 1},
+                {"model": "rf"}, {"datasets": []}):
+        with pytest.raises(ValueError):
+            app_from_config(bad)
+    pytest.importorskip("cellcanvas_core.semantic.fewshot", reason="core without FewShotClassifier")
+    app = app_from_config({"datasets": {"demo": paths}, "model": "fewshot"})
+    assert type(app.state.datasets["demo"].manager.model).__name__ == "FewShotClassifier"
+
+
+def test_fewshot_model_trains_and_predicts_over_http(case_factory, serve):
+    pytest.importorskip("cellcanvas_core.semantic.fewshot", reason="core without FewShotClassifier")
+    from cellcanvas_service.app import fewshot_manager
+
+    case = case_factory(depth=2)
+    with httpx.Client(base_url=serve({"demo": case.dataset}, manager_factory=fewshot_manager), timeout=60) as client:
+        assert client.post("/datasets/demo/train", json={}).status_code == 200
+        assert client.post("/datasets/demo/predict", json={"batch_size": 7}).json()["prediction_status"] == "ready"
+    prediction = case.dataset.segmentation[:]
+    assert prediction.shape == case.expected.shape and set(np.unique(prediction)) <= {1, 3}

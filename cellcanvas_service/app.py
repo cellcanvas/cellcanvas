@@ -22,6 +22,28 @@ def default_manager(dataset):
         DataManager([dataset]), RandomForestClassifier(random_state=0, n_jobs=1))
 
 
+def fewshot_manager(dataset):
+    """Core's few-shot head (MLP + nearest-neighbour vote on frozen features)."""
+    try:
+        from cellcanvas_core.semantic.fewshot import FewShotClassifier
+    except ImportError:
+        raise ValueError("The installed cellcanvas-core has no FewShotClassifier; "
+                         "install a version that includes it or use model 'rf'.") from None
+    # unlabelled=None: DataManager already drops unpainted voxels and shifts classes to 0
+    return SemanticSegmentationManager(DataManager([dataset]), FewShotClassifier(unlabelled=None))
+
+
+MODELS = {"rf": default_manager, "fewshot": fewshot_manager}
+
+
+def manager_factory_for(model="rf"):
+    """The manager factory of a config ``model`` name; unknown names raise ValueError."""
+    try:
+        return MODELS[model]
+    except (KeyError, TypeError):
+        raise ValueError(f"Unknown model {model!r}; choose one of {sorted(MODELS)}.") from None
+
+
 class ServiceError(Exception):
     def __init__(self, message, code, status):
         super().__init__(message)
