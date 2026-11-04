@@ -25,6 +25,7 @@
 #     "fsspec[http]",
 #     "requests",
 #     "numpy",
+#     "superqt>=0.7",
 # ]
 # ///
 
@@ -36,8 +37,6 @@ from zarr.storage import LRUStoreCache
 import napari
 import sys
 import requests
-import queue
-import threading
 import json
 from pathlib import Path
 from qtpy.QtWidgets import (
@@ -59,7 +58,8 @@ from qtpy.QtWidgets import (
     QGridLayout,
     QDialog,
 )
-from qtpy.QtCore import Qt, QPoint
+from qtpy.QtCore import Qt, QPoint, QEvent, Slot
+from cellcanvas_painting import PaintingSync
 from napari.utils import DirectLabelColormap
 
 
@@ -240,7 +240,7 @@ class CopickPlugin(QWidget):
         self.active_prediction_layer = None
         self.current_run_name = None
         self.current_voxel_size = None
-        self.painting_callback = None
+        self.painting_sync = None
         self.painting_layer = None
         self.prediction_layer = None
         
@@ -273,6 +273,17 @@ class CopickPlugin(QWidget):
         
         self.cellcanvas_status_label = QLabel("CellCanvas: Not connected")
         cellcanvas_layout.addWidget(self.cellcanvas_status_label)
+        self.painting_status_label = QLabel("No remote painting loaded.")
+        self.painting_status_label.setWordWrap(True)
+        cellcanvas_layout.addWidget(self.painting_status_label)
+        self.retry_painting_button = QPushButton("Retry Painting Save")
+        self.retry_painting_button.setEnabled(False)
+        self.retry_painting_button.clicked.connect(self.retry_painting)
+        cellcanvas_layout.addWidget(self.retry_painting_button)
+        self.save_painting_copy_button = QPushButton("Save Local Copy and Disconnect…")
+        self.save_painting_copy_button.setEnabled(False)
+        self.save_painting_copy_button.clicked.connect(self.save_painting_copy)
+        cellcanvas_layout.addWidget(self.save_painting_copy_button)
         
         # CellCanvas configuration button
         self.configure_cellcanvas_button = QPushButton("Configure CellCanvas")
@@ -288,36 +299,6 @@ class CopickPlugin(QWidget):
 
         self.setLayout(layout)
 
-    def process_update_queue(self):
-        """Background thread to process painting updates."""
-        import time
-        while True:
-            try:
-                # Get an item from the queue with a timeout to allow checking for exit
-                try:
-                    item = self.update_queue.get(timeout=0.5)
-                except queue.Empty:
-                    time.sleep(0.1)
-                    continue
-                
-                if item is None:  # Sentinel value to stop the thread
-                    break
-                
-                # Process the update
-                endpoint, params, method = item
-                
-                try:
-                    # Send the update to the server
-                    self.cellcanvas_client.send_request(endpoint, params, method)
-                except Exception as e:
-                    print(f"Error processing update: {str(e)}")
-                
-                # Mark this task as done
-                self.update_queue.task_done()
-            except Exception as e:
-                print(f"Error in update queue processing: {str(e)}")  
-    
-
     def open_file_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Config", "", "JSON Files (*.json)"
@@ -326,8 +307,12 @@ class CopickPlugin(QWidget):
             self.load_config(path)
 
     def load_config(self, path=None):
+        if not self._can_switch_painting():
+            return False
         if path:
-            self.root = copick.from_file(path)
+            root = copick.from_file(path)
+            self._detach_painting()
+            self.root = root
             self.populate_tree()
             
             # Update CellCanvas run name if available
@@ -530,6 +515,8 @@ class CopickPlugin(QWidget):
             self.expand_voxel_spacing(item, voxel_spacing)
 
     def load_tomogram(self, tomogram):
+        if not self._can_switch_painting():
+            return None
         # TODO update cell canvas settings when tomogram is loaded
         # self.cellcanvas_settings['run_name'] = data.meta.name
         # self.cellcanvas_settings['voxel_spacing'] = data.meta.voxel_size
@@ -583,6 +570,8 @@ class CopickPlugin(QWidget):
 
     def ensure_and_load_segmentations(self, run_name, voxel_size, tomogram_type):
         """Ensure painting and prediction segmentations exist and load them from the server via HTTP zarr."""
+        if not self._can_switch_painting():
+            return False
         print(f"Ensuring and loading segmentations for {run_name}, voxel size {voxel_size}, tomogram {tomogram_type}")
         
         # First, check if the server is connected
@@ -591,7 +580,9 @@ class CopickPlugin(QWidget):
             # Try to reconnect
             if not self.cellcanvas_client.test_connection():
                 print("Error: Cannot connect to CellCanvas server. Segmentations will not be synchronized.")
+                self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
                 return False
+        self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
         
         # Prepare the request data
         request_data = {
@@ -614,10 +605,6 @@ class CopickPlugin(QWidget):
         if response and response.get('status') == 'success':
             print("Successfully ensured segmentations exist on server")
             
-            # Store the current run and voxel size for later use
-            self.current_run_name = run_name
-            self.current_voxel_size = voxel_size
-            
             # Load the segmentations via HTTP zarr
             server_url = self.cellcanvas_client.server_url
             base_url = server_url.rstrip("/")
@@ -627,10 +614,19 @@ class CopickPlugin(QWidget):
             prediction_url = f"{base_url}/{run_name}/Segmentations/{voxel_size}_napariUser_{self.session_id}_prediction-multilabel.zarr"
             
             print(f"Loading painting segmentation from: {painting_url}")
-            self.painting_layer = self._load_segmentation_from_url(painting_url, "Painting", voxel_size)
+            painting = self._load_segmentation_from_url(painting_url, "Painting", voxel_size)
             
             print(f"Loading prediction segmentation from: {prediction_url}")
-            self.prediction_layer = self._load_segmentation_from_url(prediction_url, "Prediction", voxel_size)
+            prediction = self._load_segmentation_from_url(prediction_url, "Prediction", voxel_size)
+            if painting is None or prediction is None:
+                for layer in (painting, prediction):
+                    if layer is not None:
+                        self.viewer.layers.remove(layer)
+                self.info_label.setText("Could not load remote annotations; previous painting is still attached.")
+                return False
+
+            self.current_run_name, self.current_voxel_size = run_name, voxel_size
+            self.painting_layer, self.prediction_layer = painting, prediction
             
             # Set up event listener for painting updates if the layer was loaded
             if self.painting_layer:
@@ -652,6 +648,7 @@ class CopickPlugin(QWidget):
 
     def _load_segmentation_from_url(self, url, name_prefix, voxel_size):
         """Load a segmentation from a zarr URL into napari."""
+        layer = None
         try:
             import zarr
             from fsspec import get_mapper
@@ -660,7 +657,7 @@ class CopickPlugin(QWidget):
             
             # Open the zarr store using fsspec
             store = get_mapper(url)
-            zarr_root = zarr.open(store, mode='r+')
+            zarr_root = zarr.open(store, mode="r")
             
             # Find the data array - either "data" or "0" are common dataset names
             data_arr = None
@@ -689,12 +686,15 @@ class CopickPlugin(QWidget):
             
             # Add the segmentation to napari
             layer = self.viewer.add_labels(
-                data_arr,
+                data_arr[:] if name_prefix.lower() == "painting" else data_arr,
                 name=f"{name_prefix} Segmentation",
                 scale=scale,
                 opacity=0.5
             )
             
+            if name_prefix.lower() != "painting":
+                layer.editable = False
+
             # For painting layer, set up the colormap and painting labels
             if name_prefix.lower() == "painting" and hasattr(self.root, 'config') and hasattr(self.root.config, 'pickable_objects'):
                 # Create a color map based on copick colors
@@ -718,111 +718,69 @@ class CopickPlugin(QWidget):
             return layer
             
         except Exception as e:
+            if layer is not None:
+                self.viewer.layers.remove(layer)
             print(f"Error loading {name_prefix} segmentation from {url}: {str(e)}")
             import traceback
             traceback.print_exc()
             return None
 
     def setup_painting_listener(self, layer):
-        """Set up event listener for painting layer to send updates to the server with enhanced debugging."""
-        
-        # Remove any existing callback before adding a new one
-        if hasattr(self, 'painting_callback') and self.painting_callback is not None:
-            # Try to disconnect previous callback if it exists
-            try:
-                # Attempt to disconnect from various event types
-                for event_type in ['data', 'set_data', 'paint']:
-                    if hasattr(layer.events, event_type):
-                        try:
-                            event = getattr(layer.events, event_type)
-                            event.disconnect(self.painting_callback)
-                            print(f"Disconnected callback from {event_type} event")
-                        except Exception as e:
-                            print(f"Could not disconnect from {event_type}: {str(e)}")
-            except Exception as e:
-                print(f"Error disconnecting callbacks: {str(e)}")
-        
-        # Add verbose debug output at start of painting listener setup
-        print(f"\nSetting up painting listener for layer: {layer.name}")
-        print(f"Available events on layer: {[attr for attr in dir(layer.events) if not attr.startswith('_')]}")
-        print(f"Layer class: {layer.__class__.__name__}")
-        print(f"Layer data shape: {layer.data.shape}")
-        print(f"Layer selected label: {layer.selected_label}")
-        
-        # Create a queue if it doesn't exist
-        if not hasattr(self, 'update_queue'):
-            import queue
-            self.update_queue = queue.Queue()
-            self.worker_thread = threading.Thread(target=self.process_update_queue, daemon=True)
-            self.worker_thread.start()
+        """Bind an editable local buffer to a fixed server/project context."""
+        self._detach_painting()
+        context = {
+            "run_name": self.current_run_name, "voxel_size": self.current_voxel_size,
+            "user_id": "napariUser", "session_id": str(self.session_id),
+            "segmentation_name": "painting",
+        }
+        client = CellCanvasClient(self.cellcanvas_client.server_url)
+        self.painting_sync = PaintingSync(layer, client, context, self)
+        self.painting_sync.status_changed.connect(self._painting_status)
+        self._painting_status("Painting saved.")
 
-        # Define the callback function for label changes
-        def on_data_changed(event):
-            # Only handle data change events from this specific layer
-            if event.source != layer:
-                return
-            
-            # Try different approaches to get coordinates
-            coordinates = None
-            
-            if hasattr(event, 'coordinates') and event.coordinates is not None:
-                coordinates = event.coordinates
-            elif hasattr(event, 'data') and hasattr(event.data, 'coordinates') and event.data.coordinates is not None:
-                coordinates = event.data.coordinates
-            elif hasattr(event, 'indices') and event.indices is not None:
-                coordinates = event.indices
-            elif hasattr(event, 'pos') and event.pos is not None:
-                coordinates = [event.pos]
-                
-            if coordinates is None or len(coordinates) == 0:
-                return
-                
-            # Convert coordinates to a list of [z, y, x] format
-            coords = []
-            for coord in coordinates:
-                # Ensure we have 3D coordinates and convert to integers
-                if len(coord) == 3:
-                    coords.append([int(coord[0]), int(coord[1]), int(coord[2])])
-                    
-            if len(coords) == 0:
-                return
-                
-            # Get current label
-            current_label = layer.selected_label
-            
-            # Prepare the request data
-            request_data = {
-                'run_name': self.current_run_name,
-                'voxel_size': self.current_voxel_size,
-                'user_id': 'napariUser',
-                'session_id': self.session_id,
-                'segmentation_name': 'painting',
-                'coordinates': coords,
-                'label': int(current_label)
-            }
-            
-            # Add to queue instead of blocking with direct request
-            self.update_queue.put(('api/painting/update', request_data, 'POST'))
-        
-        # Connect to all relevant event types to ensure we catch painting operations
-        print("Connecting event handlers...")
-        
-        # Main data change event
-        layer.events.data.connect(on_data_changed)
-        print("Connected to layer.events.data")
-        
-        # Connect to paint event if available
-        if hasattr(layer.events, 'paint'):
-            layer.events.paint.connect(on_data_changed)
-            print("Connected to layer.events.paint")
-        
-        # Connect to set_data event if available
-        if hasattr(layer.events, 'set_data'):
-            layer.events.set_data.connect(on_data_changed)
-            print("Connected to layer.events.set_data")
-            
-        # Save a reference to the current painting layer callback
-        self.painting_callback = on_data_changed
+    @Slot(str)
+    def _painting_status(self, message):
+        self.painting_status_label.setText(message)
+        self.retry_painting_button.setEnabled(
+            self.painting_sync is not None and self.painting_sync.failed)
+        self.save_painting_copy_button.setEnabled(self.painting_sync is not None)
+
+    @Slot()
+    def retry_painting(self):
+        if self.painting_sync is not None:
+            self.painting_sync.retry()
+
+    @Slot()
+    def save_painting_copy(self):
+        if self.painting_sync is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save local ZYX painting", "painting.npy",
+                                            "NumPy array (*.npy)")
+        if not path:
+            return
+        try:
+            np.save(path, self.painting_sync.layer.data, allow_pickle=False)
+        except Exception as error:
+            self.info_label.setText(f"Could not save local painting: {error}")
+            return
+        self.painting_sync.detach(saved_locally=True)
+        self.painting_sync.deleteLater()
+        self.painting_sync = None
+        self._painting_status("Local copy saved; remote sync disconnected. An in-flight request may still finish.")
+
+    def _can_switch_painting(self):
+        if self.painting_sync is not None and self.painting_sync.pending:
+            self.info_label.setText("Retry painting or save a local copy before switching or closing.")
+            return False
+        return True
+
+    def _detach_painting(self):
+        if self.painting_sync is not None:
+            self.painting_sync.detach()
+            self.painting_sync.deleteLater()
+            self.painting_sync = None
+        self.retry_painting_button.setEnabled(False)
+        self.save_painting_copy_button.setEnabled(False)
 
     def load_segmentation(self, segmentation):
         zarr_data = zarr.open(segmentation.zarr(), "r+")
@@ -1086,7 +1044,11 @@ class CopickPlugin(QWidget):
             voxel_spacing=self.cellcanvas_settings['voxel_spacing']
         )
         
+        if not self._can_switch_painting():
+            dialog.deleteLater()
+            return
         if dialog.exec_():
+            self._detach_painting()
             # Update settings
             self.cellcanvas_settings = dialog.get_settings()
             self.cellcanvas_client = CellCanvasClient(self.cellcanvas_settings['server_url'])
@@ -1098,6 +1060,7 @@ class CopickPlugin(QWidget):
             else:
                 self.cellcanvas_status_label.setText(self.cellcanvas_client.get_status_text())
                 self.info_label.setText("Warning: Could not connect to CellCanvas server. Check settings.")
+        dialog.deleteLater()
 
     def test_server_connection(self):
         """Test the connection to the CellCanvas server."""
@@ -1109,14 +1072,24 @@ class CopickPlugin(QWidget):
             return False
 
     def cleanup(self):
-        """Ask the update worker to stop and release the executor."""
-        if hasattr(self, 'update_queue'):
-            self.update_queue.put(None)
+        """Detach a saved buffer without discarding outstanding edits."""
+        if not self._can_switch_painting():
+            return False
+        self._detach_painting()
         if hasattr(self, 'executor'):
             self.executor.shutdown(wait=False)
+        return True
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Close and not self._can_switch_painting():
+            event.ignore()
+            return True
+        return super().eventFilter(watched, event)
 
     def closeEvent(self, event):
-        self.cleanup()
+        if not self.cleanup():
+            event.ignore()
+            return
         super().closeEvent(event)
 
 if __name__ == "__main__":
@@ -1146,6 +1119,7 @@ if __name__ == "__main__":
     copick_plugin.cellcanvas_status_label.setText(f"CellCanvas: Connected to {args.server_url}")
     
     viewer.window.add_dock_widget(copick_plugin, area="right")
+    copick_plugin.window().installEventFilter(copick_plugin)
     try:
         napari.run()
     finally:
