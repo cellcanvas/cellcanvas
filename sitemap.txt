@@ -9,7 +9,12 @@ Description: Run CellCanvas, a tool for cellular image analysis.
 URL: https://atrium.cellcanvas.org/workflows/cellcanvas-prototype
 
 Group: workflows
-Name: napari-copick-cellcanvas
+Name: napari-client
+Description: No description provided.
+URL: https://atrium.cellcanvas.org/workflows/napari-client
+
+Group: workflows
+Name: napari-copick-cellcanvas (client)
 Description: A Python script to launch napari with the napari-copick plugin integrated with CellCanvas server.
 URL: https://atrium.cellcanvas.org/workflows/napari-client
 
