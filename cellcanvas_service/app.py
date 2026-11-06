@@ -17,7 +17,14 @@ a grid that differs from the dataset's is refused. A dataset may declare its
 label classes (0 is always unknown); painting with undeclared values is refused.
 
 A prediction is readable only after it completed, by its version, with the
-digest of the stored voxels, so clients never publish a partial write. Each
+digest of the stored voxels, so clients never publish a partial write.
+Prediction can be limited to a region (for example one slice of a
+full-resolution volume); that version then consists of the region only, and
+reading it returns the region's voxels with their bounds.
+
+Features may be stored per voxel or as a patch-token grid that core
+interpolates on read (``cellcanvas_patch_grid`` metadata on the Zarr array);
+the config is the same, ``features_path`` names either. Each
 completed prediction has a result record: the painting revision and digest it
 was trained on, the classifier, inferred seeds, feature provenance and labels.
 """
@@ -110,6 +117,43 @@ def inferred_record(parameters, indices):
             "indices_digest": "sha256:" + hashlib.sha256(indices.tobytes()).hexdigest()}
 
 
+AXES = ("z", "y", "x")
+
+
+def parse_region(value, shape):
+    """Slices of a ``{"z": [start, stop], ...}`` request (missing axes are whole), or None for the volume."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not value or set(value) - set(AXES):
+        raise ServiceError('region must map some of "z", "y", "x" to [start, stop].', "invalid_request", 400)
+    region = []
+    for axis, size in zip(AXES, shape, strict=True):
+        bounds = value.get(axis, [0, size])
+        if (not isinstance(bounds, list) or len(bounds) != 2
+                or not all(isinstance(b, int) and not isinstance(b, bool) for b in bounds)
+                or not 0 <= bounds[0] < bounds[1] <= size):
+            raise ServiceError(f"region {axis} must be [start, stop] within 0..{size}.", "invalid_request", 400)
+        region.append(slice(*bounds))
+    return tuple(region)
+
+
+def region_record(region):
+    return None if region is None else {axis: [r.start, r.stop] for axis, r in zip(AXES, region, strict=True)}
+
+
+def read_region(array, region):
+    return array[...] if region is None else array[region]
+
+
+def feature_source(values):
+    """How one feature array is stored: per voxel, or as a patch-token grid interpolated on read."""
+    tokens = getattr(values, "tokens", None)
+    if tokens is None:
+        return {"kind": "voxel", "shape": list(values.shape), "dtype": str(np.dtype(values.dtype))}
+    return {"kind": "patch_grid", "shape": list(values.shape), "dtype": str(np.dtype(values.dtype)),
+            "token_grid": list(tokens.shape), "interpolation": "bilinear, align_corners=false in y/x; z unchanged"}
+
+
 def default_manager(dataset):
     return SemanticSegmentationManager(
         DataManager([dataset]), RandomForestClassifier(random_state=0, n_jobs=1))
@@ -139,6 +183,7 @@ class DatasetState:
     prediction_version: int = 0
     prediction_painting_revision: str | None = None
     prediction_digest: str | None = None
+    prediction_region: dict | None = None
     lock: object = field(default_factory=Lock)
     jobs: dict = field(default_factory=dict)
     jobs_lock: object = field(default_factory=Lock)
@@ -155,9 +200,11 @@ class DatasetState:
             "prediction": {"axes": ["z", "y", "x"], "shape": list(dataset.segmentation.shape),
                            "dtype": str(np.dtype(dataset.segmentation.dtype)), "status": self.prediction_status,
                            "version": self.prediction_version,
-                           "painting_revision": self.prediction_painting_revision},
+                           "painting_revision": self.prediction_painting_revision,
+                           "region": self.prediction_region},
             "features": {"axis": dataset.feature_axis, "axes": feature_axes,
-                         "shapes": [list(values.shape) for values in dataset.features.values()]},
+                         "shapes": [list(values.shape) for values in dataset.features.values()],
+                         "sources": [feature_source(values) for values in dataset.features.values()]},
             "spatial_transform": {"scale": list(geometry.scale), "translation": list(geometry.translation),
                                   "units": list(geometry.units)},
             "trained": self.trained,
@@ -199,7 +246,7 @@ class DatasetState:
 
         return {"image": location(self.dataset.image), "painting": location(self.dataset.labels),
                 "prediction": location(self.dataset.segmentation),
-                "features": [location(array) for array in self.dataset.features.values()]}
+                "features": [location(getattr(array, "tokens", array)) for array in self.dataset.features.values()]}
 
     def operation(self, operation_id):
         with self.jobs_lock:
@@ -271,10 +318,13 @@ class DatasetState:
             completed = prediction["status"] == "ready"
             self.prediction_version = prediction["version"] - (0 if completed else 1)
             self.prediction_painting_revision = prediction.get("painting_revision")
+            region = parse_region(prediction.get("region"), self.dataset.segmentation.shape)
             if prediction["status"] == "writing":
                 self.prediction_status = "failed"
-            elif prediction["status"] == "ready" and prediction["digest"] == label_digest(self.dataset.segmentation[...]):
+            elif prediction["status"] == "ready" and prediction["digest"] == label_digest(
+                    read_region(self.dataset.segmentation, region)):
                 self.prediction_status, self.prediction_digest = "ready", prediction["digest"]
+                self.prediction_region = prediction.get("region")
             else:
                 self.prediction_status = "unknown"
 
@@ -288,7 +338,7 @@ class DatasetState:
             if operation == "train":
                 self.train(options, operation_id)
             else:
-                self.predict(options.get("batch_size", 65536), operation_id)
+                self.predict(options.get("batch_size", 65536), operation_id, options.get("region"))
             return {"status": "success", "operation": operation, "trained": self.trained,
                     "prediction_status": self.prediction_status, "prediction_version": self.prediction_version,
                     "painting_revision": self.model_painting_revision,
@@ -347,18 +397,22 @@ class DatasetState:
         if hasattr(manager, "model"):
             self.store.save_model(self.name, manager.model, record)
 
-    def predict(self, batch_size, operation_id):
+    def predict(self, batch_size, operation_id, region=None):
         if not self.trained:
             raise ServiceError("Train this dataset before predicting.", "not_trained", 409)
+        slices = parse_region(region, self.dataset.segmentation.shape)
         version = self.prediction_version + 1
         self.prediction_status = "writing"
+        self.prediction_region = None
         self.store.save_record("prediction", self.name, {"status": "writing", "version": version,
-                                                         "operation_id": operation_id})
+                                                         "operation_id": operation_id, "region": region})
         try:
-            self.manager.predict_to_segmentation(self.dataset, batch_size=batch_size)
+            # Whole-volume calls keep the original signature, so cores without regions still serve them.
+            self.manager.predict_to_segmentation(self.dataset, batch_size=batch_size,
+                                                 **({} if slices is None else {"region": slices}))
             # Digest what is stored, not what was computed, so the record describes the readable output.
-            digest = label_digest(self.dataset.segmentation[...])
-            self.store.save_result(self.name, version, self.result_record(version, operation_id, digest))
+            digest = label_digest(read_region(self.dataset.segmentation, slices))
+            self.store.save_result(self.name, version, self.result_record(version, operation_id, digest, region))
         except Exception:
             self.prediction_status = "failed"
             self.store.save_record("prediction", self.name, {"status": "failed", "version": version,
@@ -368,16 +422,20 @@ class DatasetState:
         self.prediction_painting_revision = self.model_painting_revision
         self.prediction_status = "ready"
         self.prediction_digest = digest
+        self.prediction_region = region
         self.store.save_record("prediction", self.name, {
             "status": "ready", "version": version, "operation_id": operation_id, "digest": digest,
-            "painting_revision": self.prediction_painting_revision})
+            "painting_revision": self.prediction_painting_revision, "region": region})
 
-    def result_record(self, version, operation_id, digest):
-        """What a completed prediction was made from; a client checks ``digest`` against the voxels it read."""
+    def result_record(self, version, operation_id, digest, region=None):
+        """What a completed prediction was made from; a client checks ``digest`` against the voxels it read.
+
+        ``shape`` is the dataset grid; a region prediction covers ``region`` only and its digest is of those voxels.
+        """
         model = self.model_record or {}
         scale, translation = grid_angstrom(self.dataset.spatial_transform)
         return {"version": version, "operation_id": operation_id, "digest": digest, "encoding": "semantic",
-                "shape": list(self.dataset.segmentation.shape), "scale_angstrom": scale,
+                "shape": list(self.dataset.segmentation.shape), "region": region, "scale_angstrom": scale,
                 "translation_angstrom": translation, "backend": backend_version(),
                 "painting_revision": model.get("painting_revision"), "painting_digest": model.get("painting_digest"),
                 "classifier": model.get("classifier"), "label_policy": model.get("label_policy"),
@@ -459,11 +517,14 @@ class DatasetState:
             if self.prediction_status != "ready" or version != self.prediction_version:
                 raise ServiceError("That prediction version is not complete and current.", "not_ready", 409)
             array = self.dataset.segmentation
-            data = np.ascontiguousarray(array[...])
+            region = parse_region(self.prediction_region, array.shape)
+            data = np.ascontiguousarray(read_region(array, region))
             if self.prediction_digest is not None and label_digest(data) != self.prediction_digest:
                 self.prediction_status = "unknown"
                 raise ServiceError("Stored prediction changed after it was completed.", "not_ready", 409)
+            bounds = region or tuple(slice(0, n) for n in array.shape)
             return data, {"X-Shape": ",".join(map(str, data.shape)), "X-Dtype": str(data.dtype),
+                          "X-Region": ",".join(f"{r.start}:{r.stop}" for r in bounds),
                           "X-Prediction-Version": str(version),
                           "X-Painting-Revision": self.prediction_painting_revision or "",
                           "X-Result-Digest": self.prediction_digest or label_digest(data)}
@@ -570,15 +631,19 @@ def create_app(datasets, *, manager_factory=default_manager, store=None, registr
 
     async def predict(request):
         state = state_for(request)
-        data = await options(request, {"batch_size", "operation_id", "service_id"})
+        data = await options(request, {"batch_size", "operation_id", "service_id", "region"})
         batch_size = data.get("batch_size", 65536)
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
             raise ServiceError("batch_size must be a positive integer.", "invalid_request", 400)
+        settings = {"batch_size": batch_size}
+        if data.get("region") is not None:
+            parse_region(data["region"], state.dataset.segmentation.shape)
+            settings["region"] = data["region"]
         identifier = operation_id(data)
         if identifier is not None:
-            return JSONResponse(dict(state.submit(identifier, "predict", {"batch_size": batch_size}),
+            return JSONResponse(dict(state.submit(identifier, "predict", settings),
                                      service_id=service_id), status_code=202)
-        result = await run_in_threadpool(state.execute, "predict", {"batch_size": batch_size})
+        result = await run_in_threadpool(state.execute, "predict", settings)
         return JSONResponse(result)
 
     def check_service(data):

@@ -3,6 +3,12 @@
 Run in a torch + Zarr 2 environment. No private dependencies or model fine-tuning.
 The image is grayscale replicated to RGB; patch features are bilinearly resampled
 onto each original XY slice. This is not a native 3D model or a quality benchmark.
+
+--store dense (default) writes float16 features on every voxel (768 x Z x Y x X).
+--store tokens writes only the 32 x 32 patch-token grid of each slice (768 x Z x 32 x 32,
+float32) with ``cellcanvas_patch_grid`` metadata; cellcanvas-core interpolates it on read
+with the same bilinear, align_corners=False resampling, so it serves the same features
+without a dense volume (needed at full resolution, where dense features take hundreds of GB).
 """
 
 import argparse
@@ -32,6 +38,8 @@ def main():
     parser.add_argument("out", type=Path)
     parser.add_argument("--model-source", required=True, type=Path)
     parser.add_argument("--checkpoint", required=True, type=Path)
+    parser.add_argument("--store", choices=("dense", "tokens"), default="dense",
+                        help="dense voxel features (default) or the patch-token grid read lazily by core")
     args = parser.parse_args()
     if args.out.exists():
         parser.error("Output exists; choose a new output to preserve prior features.")
@@ -56,12 +64,13 @@ def main():
     )
     model.eval().cuda()
     depth, height, width = volume.shape
+    tokens_only = args.store == "tokens"
     features = zarr.open_array(
         str(args.out),
         mode="w",
-        shape=(768, depth, height, width),
-        chunks=(768, 1, min(64, height), min(64, width)),
-        dtype="f2",
+        shape=(768, depth, 32, 32) if tokens_only else (768, depth, height, width),
+        chunks=(768, 1, 32, 32) if tokens_only else (768, 1, min(64, height), min(64, width)),
+        dtype="f4" if tokens_only else "f2",
         compressor=Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE),
     )
     mean = torch.tensor([0.485, 0.456, 0.406], device="cuda")[None, :, None, None]
@@ -76,10 +85,13 @@ def main():
             with torch.autocast("cuda", dtype=torch.float16):
                 tokens = model.forward_features((x - mean) / std)["x_norm_patchtokens"]
             dense = tokens.float().transpose(1, 2).reshape(-1, 768, 32, 32)
-            dense = F.interpolate(
-                dense, size=(height, width), mode="bilinear", align_corners=False
-            )
-            out = dense.cpu().numpy().astype(np.float16)
+            if tokens_only:
+                out = dense.cpu().numpy()
+            else:
+                dense = F.interpolate(
+                    dense, size=(height, width), mode="bilinear", align_corners=False
+                )
+                out = dense.cpu().numpy().astype(np.float16)
             if not np.isfinite(out).all():
                 raise RuntimeError(f"Nonfinite features at z={z}")
             features[:, z : z + len(out)] = out.transpose(1, 0, 2, 3)
@@ -108,7 +120,9 @@ def main():
         "grid": {
             "shape": list(volume.shape),
             "axes": ["d", "z", "y", "x"],
-            "resampling": "Each XY slice resized to 448x448; 32x32 patch grid bilinearly resampled to original XY grid, align_corners=False; Z unchanged",
+            "resampling": "Each XY slice resized to 448x448; 32x32 patch grid bilinearly resampled to original XY grid, align_corners=False; Z unchanged"
+            + ("; stored as the token grid and resampled on read" if tokens_only else ""),
+            "storage": "patch_grid" if tokens_only else "dense",
         },
         "preprocessing": {
             "percentiles": [1, 99],
@@ -139,6 +153,17 @@ def main():
         },
         "scope": "Frozen per-slice public features for interactive classification; no native-3D or segmentation accuracy claim.",
     }
+    if tokens_only:
+        # Written last: an interrupted extraction is not recognized as a token grid.
+        features.attrs["cellcanvas_patch_grid"] = {
+            "shape": list(volume.shape),
+            "interpolation": "bilinear",
+            "align_corners": False,
+            "dtype": "float16",
+            "provenance": {key: manifest[key] for key in ("model", "license", "public", "grid", "preprocessing")}
+            | {"checkpoint_sha256": manifest["checkpoint"]["sha256"],
+               "extractor_sha256": manifest["implementation"]["extractor_sha256"]},
+        }
     path = args.out.with_suffix(".manifest.json")
     path.write_text(json.dumps(manifest, indent=2))
     print(str(path), flush=True)
