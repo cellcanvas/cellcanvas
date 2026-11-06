@@ -1,0 +1,11 @@
+{
+  "name": "aws",
+  "description": "Cloud instance behind an authenticating proxy (for example the BioNotate host). Image and features are read from an object store with the instance's credentials; painting, prediction and state stay on the instance volume.",
+  "bind": {"host": "0.0.0.0", "port": "${CELLCANVAS_PORT:-8001}", "exposure": "behind_proxy"},
+  "config": "${CELLCANVAS_SERVICE_CONFIG}",
+  "state_dir": "${CELLCANVAS_STATE_DIR:-/var/lib/cellcanvas}",
+  "data": {"kind": "fsspec", "root": "${CELLCANVAS_DATA_ROOT}", "credentials": "environment", "storage_options": {}},
+  "compute": {"threads": 4},
+  "providers": {"allow_private": false, "plugins": []},
+  "prompt_backends": []
+}

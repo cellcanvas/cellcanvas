@@ -41,6 +41,7 @@ def test_prepare_preserves_geometry_and_opens_in_core(source):
     tmp_path, tomogram, features, manifest = source
     config = prepare(tomogram, features, write(tmp_path, manifest), tmp_path / "out", "ts1")
     paths = json.loads(config.read_text())["datasets"]["ts1"]
+    assert paths.pop("features_manifest") == manifest
     dataset = DataSet.from_paths(**paths)
     assert dataset.labels.shape == (4, 5, 6)
     assert list(dataset.spatial_transform.scale) == [10.0, 10.0, 10.0]

@@ -11,6 +11,8 @@ from threading import Event, Thread, get_ident
 import pytest
 
 copick = pytest.importorskip("copick", reason="Legacy workflow tests require the server/client extras")
+if int(__import__("zarr").__version__.split(".")[0]) >= 3:
+    pytest.skip("Legacy workflow tests run in the Zarr 2 server/client environment", allow_module_level=True)
 import numpy as np
 import requests
 import uvicorn
