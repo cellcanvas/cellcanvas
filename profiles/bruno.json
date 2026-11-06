@@ -1,0 +1,11 @@
+{
+  "name": "bruno",
+  "description": "Institute HPC compute node: loopback bind reached through an SSH tunnel; copick projects on the shared filesystem. Start it inside a scheduled allocation.",
+  "bind": {"host": "127.0.0.1", "port": "${CELLCANVAS_PORT:-8001}", "exposure": "loopback"},
+  "config": "${CELLCANVAS_SERVICE_CONFIG}",
+  "state_dir": "${CELLCANVAS_STATE_DIR}",
+  "data": {"kind": "posix", "root": "${CELLCANVAS_DATA_ROOT}", "credentials": "none"},
+  "compute": {"threads": 8},
+  "providers": {"allow_private": false, "plugins": []},
+  "prompt_backends": [{"name": "nninteractive", "url": "${NNINTERACTIVE_URL:-http://127.0.0.1:1527}", "optional": true}]
+}

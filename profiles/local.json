@@ -1,0 +1,11 @@
+{
+  "name": "local",
+  "description": "Workstation or laptop: loopback only, data and state on local disk.",
+  "bind": {"host": "127.0.0.1", "port": 8001, "exposure": "loopback"},
+  "config": "${CELLCANVAS_SERVICE_CONFIG:-service.json}",
+  "state_dir": "${CELLCANVAS_STATE_DIR:-.cellcanvas-state}",
+  "data": {"kind": "posix", "root": "${CELLCANVAS_DATA_ROOT:-.}", "credentials": "none"},
+  "compute": {"threads": 4},
+  "providers": {"allow_private": false, "plugins": []},
+  "prompt_backends": [{"name": "nninteractive", "url": "${NNINTERACTIVE_URL:-http://127.0.0.1:1527}", "optional": true}]
+}

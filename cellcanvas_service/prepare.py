@@ -6,9 +6,13 @@ reconstruction's voxel grid (``d, z, y, x`` or ``z, y, x, d``); a model with a p
 resampled to that grid by its producer, with the resampling recorded in the manifest. The features manifest must
 name a public model (``"public": true``); private models belong to private adapters and are refused here.
 
-    python -m cellcanvas_service.prepare TOMOGRAM.zarr FEATURES.zarr MANIFEST.json OUT_DIR --name ts1
+    python -m cellcanvas_service.prepare TOMOGRAM.zarr FEATURES.zarr MANIFEST.json OUT_DIR --name ts1 \
+        [--labels LABELS.json]
 
-writes ``OUT_DIR/service.json`` for ``python -m cellcanvas_service`` and ``OUT_DIR/geometry.json``.
+writes ``OUT_DIR/service.json`` for ``python -m cellcanvas_service`` and ``OUT_DIR/geometry.json``. The service
+config carries the features manifest, so result records report the feature provenance. Optional labels
+(``{"classes": {"1": "background", "2": "membrane"}, "background": 1}``) declare the painted classes and enable the
+inferred-background policy.
 """
 
 import argparse
@@ -57,7 +61,7 @@ def validate_manifest(manifest, shape):
         raise ValueError(f"Features grid {grid.get('shape')} differs from reconstruction {list(shape)}")
 
 
-def prepare(tomogram, features, manifest_path, out, name):
+def prepare(tomogram, features, manifest_path, out, name, labels_path=None):
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     source, geometry = tomogram_geometry(tomogram)
@@ -84,7 +88,9 @@ def prepare(tomogram, features, manifest_path, out, name):
     }]}
     paths = {"image_path": str(image_path), "features_path": str(Path(features).resolve()),
              "labels_path": str(out / "painting.zarr"), "segmentation_path": str(out / "prediction.zarr"),
-             "make_missing_datasets": True, "feature_axis": axis}
+             "make_missing_datasets": True, "feature_axis": axis, "features_manifest": manifest}
+    if labels_path is not None:
+        paths["labels"] = json.loads(Path(labels_path).read_text())
     (out / "service.json").write_text(json.dumps({"datasets": {name: paths}}, indent=2))
     (out / "geometry.json").write_text(json.dumps({"shape": shape, **geometry, "source": str(tomogram),
                                                    "features_manifest": manifest}, indent=2))
@@ -98,9 +104,10 @@ def main():
     parser.add_argument("manifest")
     parser.add_argument("out")
     parser.add_argument("--name", required=True)
+    parser.add_argument("--labels")
     args = parser.parse_args()
     try:
-        print(prepare(args.tomogram, args.features, args.manifest, args.out, args.name))
+        print(prepare(args.tomogram, args.features, args.manifest, args.out, args.name, args.labels))
     except (ValueError, FileNotFoundError) as error:
         parser.error(str(error))
 
