@@ -101,7 +101,8 @@ def test_http_predictions_match_direct_core_after_reopen(case_factory, serve, de
         assert client.get("/health").json() == {"status": "ok"}
         metadata = client.get("/datasets").json()["datasets"]["demo"]
         assert metadata["image"] == {"axes": ["c", "z", "y", "x"], "shape": [2, depth, 5, 4]}
-        assert metadata["painting"] == {"axes": ["z", "y", "x"], "shape": [depth, 5, 4]}
+        assert metadata["painting"] == {"axes": ["z", "y", "x"], "shape": [depth, 5, 4], "dtype": "int32",
+                                        "revision": None}
         assert metadata["features"]["axis"] == axis
         assert metadata["features"]["axes"] == (["d", "z", "y", "x"] if axis == 0 else ["z", "y", "x", "d"])
         assert metadata["spatial_transform"] == {"scale": [3, 2, .5], "translation": [7, 11, 13],
@@ -360,3 +361,66 @@ def test_memory_datasets_have_no_local_store_location(serve):
         response = client.get("/datasets/demo")
         assert response.status_code == 200
         assert response.json()["storage"] == {"image": None, "painting": None, "prediction": None, "features": [None]}
+
+
+def test_painting_replacement_and_versioned_prediction_read(case_factory, serve):
+    case = case_factory(painted=False)
+    url = serve({"demo": case.dataset})
+    shape = list(case.dataset.labels.shape)
+    flat = np.ravel_multi_index(([0, 0], [2, 2], [0, 1]), shape)
+    with httpx.Client(base_url=url, timeout=5) as client:
+        service_id = client.get("/datasets/demo").json()["service_id"]
+        body = {"service_id": service_id, "revision": "r1", "shape": shape,
+                "indices": flat.tolist(), "values": [1, 3]}
+        assert client.put("/datasets/demo/painting", json=dict(body, service_id="old")).json()["code"] == \
+            "service_changed"
+        assert client.put("/datasets/demo/painting", json=dict(body, shape=[9, 9, 9])).json()["code"] == \
+            "geometry_mismatch"
+        for bad in ({"values": [0, 3]}, {"indices": [0, 0]}, {"indices": [10 ** 6, 0]}, {"values": [1]}):
+            assert client.put("/datasets/demo/painting", json=dict(body, **bad)).status_code == 400
+        assert case.dataset.labels[:].max() == 0
+        assert client.put("/datasets/demo/painting", json=body).json()["voxels"] == 2
+        expected = np.zeros(shape, "i4")
+        expected[0, 2, 0], expected[0, 2, 1] = 1, 3
+        np.testing.assert_array_equal(case.dataset.labels[:], expected)
+        assert client.get("/datasets/demo/prediction", params={"version": 0}).json()["code"] == "not_ready"
+        assert client.post("/datasets/demo/train", json={}).json()["status"] == "success"
+        meta = client.get("/datasets/demo").json()
+        assert meta["painting"]["revision"] == meta["model_painting_revision"] == "r1"
+        result = client.post("/datasets/demo/predict", json={}).json()
+        assert result["prediction_version"] == 1 and result["painting_revision"] == "r1"
+        assert client.get("/datasets/demo/prediction", params={"version": 2}).status_code == 409
+        response = client.get("/datasets/demo/prediction", params={"version": 1})
+        assert response.headers["x-shape"] == ",".join(map(str, shape))
+        assert response.headers["x-painting-revision"] == "r1"
+        data = np.frombuffer(response.content, dtype=response.headers["x-dtype"]).reshape(shape)
+        np.testing.assert_array_equal(data, case.expected)
+        # Replacing painting leaves the model trained on r1 and clears old labels.
+        body.update(revision="r2", indices=[int(flat[0])], values=[3])
+        assert client.put("/datasets/demo/painting", json=body).status_code == 200
+        meta = client.get("/datasets/demo").json()
+        assert (meta["painting"]["revision"], meta["model_painting_revision"]) == ("r2", "r1")
+        assert int((case.dataset.labels[:] > 0).sum()) == 1
+
+
+def test_failed_prediction_is_not_readable(case_factory, serve):
+    case = case_factory()
+
+    class Broken:
+        def __init__(self, dataset):
+            self.inner = default_manager(dataset)
+
+        def fit(self):
+            self.inner.fit()
+
+        def predict_to_segmentation(self, dataset, batch_size=65536):
+            dataset.segmentation[0, 0, 0] = 9  # partial write
+            raise RuntimeError("interrupted")
+
+    with httpx.Client(base_url=serve({"demo": case.dataset}, manager_factory=Broken), timeout=5) as client:
+        assert client.post("/datasets/demo/train", json={}).status_code == 200
+        assert client.post("/datasets/demo/predict", json={}).status_code == 500
+        meta = client.get("/datasets/demo").json()["prediction"]
+        assert (meta["status"], meta["version"]) == ("failed", 0)
+        for version in (0, 1):
+            assert client.get("/datasets/demo/prediction", params={"version": version}).status_code == 409
