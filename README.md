@@ -12,4 +12,5 @@ Superpixel creation needs the optional `cellcanvas-spp` package.
 
 For the headless Zarr 3 service, install `pip install '.[service]'` in a separate environment.
 Run `python -m cellcanvas_service CONFIG.json`; `"datasets"` maps names to core `DataSet.from_paths` arguments (paths are relative to the working directory).
+An optional `"model"` key picks the classifier: `"rf"` (random forest, the default) or `"fewshot"` (core's `FewShotClassifier`, when the installed core has it).
 Use `GET /datasets`, `POST /datasets/NAME/train` and `POST /datasets/NAME/predict` with optional `{"batch_size": 65536}`.
