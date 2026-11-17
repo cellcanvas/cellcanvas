@@ -30,7 +30,7 @@ client = [
 ]
 test = ["pytest>=8", "httpx>=0.27"]
 service = [
-    "cellcanvas-core @ git+https://github.com/cellcanvas/cellcanvas-core.git@e7947172d8160d060fe27f47503b67b510af13db",
+    "cellcanvas-core @ git+https://github.com/cellcanvas/cellcanvas-core.git@7008bae8b7dc4d2c75c1531771d721c4d0af9ab7",
     "starlette>=0.40",
     "uvicorn>=0.30",
 ]
